@@ -151,6 +151,8 @@ def control_summary(rows):
                                   'total_by_factor': {'p': 0, 'd': 0, 't': 0}})
         s['n_before'] += 1
         s['correct_before'] += int(row['correct_before'])
+        s['n_after'] += 1
+        s['correct_after'] += int(row['correct_after'])
         s['total_by_factor'][row['factor']] += 1
         if row['sent_before'] != row['sent_after']:
             s['changed_by_factor'][row['factor']] += 1

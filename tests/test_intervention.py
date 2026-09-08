@@ -34,6 +34,19 @@ class InterventionTests(unittest.TestCase):
             self.assertIn(row['base_split'], ('train', 'test'))
             self.assertIn(row['counterfactual_split'], ('train', 'test'))
 
+    def test_summary_after_matches_direct_row_aggregation(self):
+        # regression for the n_after/correct_after aggregation bug (melioralab-agent #25222)
+        rows = build_rows()
+        summary = control_summary(rows)
+        for policy in ('handwritten', 'holistic', 'no_message'):
+            policy_rows = [r for r in rows if r['policy'] == policy]
+            self.assertEqual(summary[policy]['n_after'], len(policy_rows))
+            self.assertEqual(summary[policy]['correct_after'],
+                              sum(int(r['correct_after']) for r in policy_rows))
+        self.assertEqual(summary['handwritten']['correct_after'], 162)
+        self.assertEqual(summary['holistic']['correct_after'], 162)
+        self.assertEqual(summary['no_message']['correct_after'], 18)
+
 
 if __name__ == '__main__':
     unittest.main()
