@@ -4,18 +4,18 @@ from pathlib import Path
 import torch
 from torch import nn
 from torch.distributions import Categorical
-from torch.nn.functional import one_hot
+from torch.nn.functional import one_hot, gumbel_softmax
 
 
 def oh(x, n): return one_hot(x, n).float()
 
 
 class Agent(nn.Module):
-    def __init__(self, private_dim, vocab, zones):
+    def __init__(self, private_dim, vocab, action_dim):
         super().__init__()
         self.body = nn.Sequential(nn.Linear(private_dim + 3 + vocab, 32), nn.Tanh())
         self.token = nn.Linear(32, vocab)
-        self.action = nn.Linear(32, zones)
+        self.action = nn.Linear(32, action_dim)
         self.value = nn.Linear(32, 1)
 
     def forward(self, private, incoming):
@@ -23,10 +23,16 @@ class Agent(nn.Module):
         return self.token(h), self.action(h), self.value(h).squeeze(-1)
 
 
-def run(seed=0, episodes=3000, rounds=2, vocab=8, zones=4, use_messages=True):
+def run(seed=0, episodes=3000, rounds=2, vocab=8, zones=4, use_messages=True,
+        message_temperature=0.7):
     torch.manual_seed(seed); torch.set_num_threads(1)
     # private = type (3) + zone (4); incoming = last token (8) + round marker (3)
-    a, b = Agent(7, vocab, zones), Agent(7, vocab, zones)
+    # An action is (own zone, guess of the partner's hidden type).  The
+    # previous zone-only head made communication causally irrelevant: each
+    # agent already observed its own zone, while type incompatibility was not
+    # controllable by any action.
+    type_count = 3
+    a, b = Agent(7, vocab, zones * type_count), Agent(7, vocab, zones * type_count)
     opt = torch.optim.Adam(list(a.parameters()) + list(b.parameters()), lr=.003)
     records=[]; recent=[]; start=time.perf_counter()
     for ep in range(1, episodes+1):
@@ -40,27 +46,49 @@ def run(seed=0, episodes=3000, rounds=2, vocab=8, zones=4, use_messages=True):
             pb = torch.cat((oh(trap_t,3), oh(trap_z,zones), marker), -1)
             ta, _, _ = a(pa, last_b)
             tb, _, _ = b(pb, last_a)
-            da, db = Categorical(logits=ta), Categorical(logits=tb)
-            ma, mb = da.sample(), db.sample()
             if use_messages:
-                last_a, last_b = oh(mb,vocab), oh(ma,vocab)
+                # Straight-through: hard one-hot message in the forward pass,
+                # continuous Gumbel gradient in the backward pass. This keeps
+                # the channel discrete at execution time while reducing the
+                # sender/receiver credit-assignment variance of REINFORCE.
+                ma = gumbel_softmax(ta, tau=message_temperature, hard=True)
+                mb = gumbel_softmax(tb, tau=message_temperature, hard=True)
+                last_a, last_b = mb, ma
             else:
                 last_a, last_b = torch.zeros_like(last_a), torch.zeros_like(last_b)
-            # action is chosen after exchange; each agent knows its own zone.
+            # Action is chosen after exchange.  The type component is a
+            # deliberate communication bottleneck: A must guess trap_t and B
+            # must guess prey_t.
             _, aa, va = a(pa, last_b)
             _, ab, vb = b(pb, last_a)
             daction, baction = Categorical(logits=aa), Categorical(logits=ab)
             act_a, act_b = daction.sample(), baction.sample()
-            logs.append(da.log_prob(ma)+db.log_prob(mb)+daction.log_prob(act_a)+baction.log_prob(act_b))
+            logs.append(daction.log_prob(act_a)+baction.log_prob(act_b))
             values.append((va+vb)/2)
-        reward = ((act_a == prey_z) & (act_b == trap_z) & (prey_t != trap_t)).float()
+        a_zone, a_guess_trap = act_a // type_count, act_a % type_count
+        b_zone, b_guess_prey = act_b // type_count, act_b % type_count
+        zone_score = 0.5 * ((a_zone == prey_z).float() + (b_zone == trap_z).float())
+        type_score = 0.5 * ((a_guess_trap == trap_t).float() +
+                            (b_guess_prey == prey_t).float())
+        terminal = ((a_zone == prey_z) & (b_zone == trap_z) &
+                    (a_guess_trap == trap_t) & (b_guess_prey == prey_t) &
+                    (prey_t != trap_t)).float()
+        # Dense components make the communication-dependent type prediction
+        # learnable under REINFORCE; terminal remains a separately weighted
+        # success signal rather than being silently conflated with shaping.
+        reward = 0.15 * zone_score + 0.40 * type_score + 0.45 * terminal
         ret = reward.detach()
         loss = sum(-log * (ret-val.detach()) + .5*(val-ret).square() for log,val in zip(logs,values)) / rounds
         opt.zero_grad(); loss.backward(); nn.utils.clip_grad_norm_(list(a.parameters())+list(b.parameters()),5); opt.step()
         recent.append(reward.item())
         if len(recent) > 100: recent.pop(0)
         if ep == 1 or ep % 300 == 0 or ep == episodes:
-            records.append({'episode':ep,'reward':reward.item(),'reward_mean_100':sum(recent)/len(recent),'loss':loss.item()})
+            records.append({'episode':ep,'reward':reward.item(),
+                            'reward_mean_100':sum(recent)/len(recent),
+                            'zone_score':zone_score.item(),
+                            'type_score':type_score.item(),
+                            'terminal_success':terminal.item(),
+                            'loss':loss.item()})
     return {'seed':seed,'episodes':episodes,'rounds':rounds,'use_messages':use_messages,
             'seconds':time.perf_counter()-start,'history':records}
 
