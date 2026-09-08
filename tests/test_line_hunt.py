@@ -19,11 +19,11 @@ class LineHuntTests(unittest.TestCase):
 
     def test_transition_order_and_terminal(self):
         env = LineHunt(length=3, horizon=2)
-        env.reset(goal_pos=1, trap_pos=2, start_a=0, start_b=2)
+        env.reset(goal_pos=1, trap_pos=2, start_a=0, start_b=1)
         with self.assertRaises(ValueError):
             env.step(99, RIGHT)
-        env.reset(goal_pos=1, trap_pos=2, start_a=0, start_b=2)
-        _, reward, done, _ = env.step(2, LEFT)
+        env.reset(goal_pos=1, trap_pos=2, start_a=0, start_b=1)
+        _, reward, done, _ = env.step(2, RIGHT)
         self.assertEqual((reward, done), (0.0, False))
         _, reward, done, info = env.step(RIGHT, TRIGGER)
         self.assertEqual((reward, done, info["success"]), (1.0, True, 1))
