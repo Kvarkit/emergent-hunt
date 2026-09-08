@@ -6,6 +6,18 @@ from emergent_hunt.environment import SymbolicHunt, states
 
 
 class LearningTests(unittest.TestCase):
+    def test_factorized_policy_gradient_matches_enumerated_joint(self):
+        logits = torch.tensor([[.2, -.1, .7], [.1, .4, -.2]], requires_grad=True)
+        dist = Categorical(logits=logits)
+        exact = torch.autograd.grad(-dist.probs[0, 1]*dist.probs[1, 2], logits, retain_graph=True)[0]
+        loss = 0
+        for p in range(3):
+            for d in range(3):
+                prob = (dist.probs[0, p]*dist.probs[1, d]).detach()
+                reward = float((p, d) == (1, 2))
+                loss = loss - prob*(reward-.4)*(dist.logits[0, p]+dist.logits[1, d])
+        torch.testing.assert_close(exact, torch.autograd.grad(loss, logits)[0])
+
     def test_training_corpus_excludes_heldout_sender_pairs(self):
         train = {tuple(row[:2]) for row in corpus('train', 'pair').tolist()}
         test = {tuple(row[:2]) for row in corpus('test', 'pair').tolist()}

@@ -19,6 +19,8 @@ controls, optional PyTorch REINFORCE trainer and unit tests. First short CPU run
 are documented in [experiments/first-smoke.md](experiments/first-smoke.md).
 The stronger [pair-held-out experiment](experiments/pair-smoke.md) reaches 100%
 train but 0% held-out across three seeds, exposing the current transfer limit.
+Further [factorized-action and reward ablations](experiments/factorized-smoke.md)
+show transfer in only one of three seeds with partial reward; grammar remains unproven.
 Successful coordination alone will not be treated as evidence of grammar.
 
 ## Layout
