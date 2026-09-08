@@ -88,6 +88,50 @@ def _fixed_grid_eval(a, b, task, rounds=2, vocab=8, zones=4, type_count=3,
     return {k: v / count for k, v in totals.items()}
 
 
+def _pair_is_held_out(type_id, zone_id, zones, holdout_mod):
+    """Deterministic factor-combination split used for transfer evaluation."""
+    return bool(holdout_mod and (type_id * zones + zone_id) % holdout_mod == 0)
+
+
+def _heldout_grid_eval(a, b, task, rounds=2, vocab=8, zones=4, type_count=3,
+                       use_messages=True, holdout_mod=0):
+    """Evaluate only states whose own type/zone pair was withheld in training."""
+    if not holdout_mod:
+        return None
+    totals = {'zone_score': 0.0, 'type_score': 0.0, 'terminal_success': 0.0}
+    count = 0
+    with torch.no_grad():
+        for prey_t in range(type_count):
+            for prey_z in range(zones):
+                for trap_t in range(type_count):
+                    for trap_z in range(zones):
+                        if not (_pair_is_held_out(prey_t, prey_z, zones, holdout_mod) or
+                                _pair_is_held_out(trap_t, trap_z, zones, holdout_mod)):
+                            continue
+                        # Reuse the canonical evaluator by evaluating one state inline.
+                        last_a = torch.zeros(1, vocab); last_b = torch.zeros(1, vocab)
+                        for r in range(rounds):
+                            marker = oh(torch.tensor([r]), rounds)
+                            pa = torch.cat((oh(torch.tensor([prey_t]), type_count), oh(torch.tensor([prey_z]), zones), marker), -1)
+                            pb = torch.cat((oh(torch.tensor([trap_t]), type_count), oh(torch.tensor([trap_z]), zones), marker), -1)
+                            ta, _, _, _ = a(pa, last_b); tb, _, _, _ = b(pb, last_a)
+                            ma = ta.argmax(-1); mb = tb.argmax(-1) if task == 'symmetric' else None
+                            last_a, last_b = _route_messages(ma, mb, vocab, task, use_messages)
+                            _, aa, _, _ = a(pa, last_b); _, ab, _, _ = b(pb, last_a)
+                            act_a, act_b = aa.argmax(-1), ab.argmax(-1)
+                        a_zone, a_guess = act_a // type_count, act_a % type_count
+                        b_zone, b_guess = act_b // type_count, act_b % type_count
+                        totals['zone_score'] += (0.5 * ((a_zone == prey_z).float() + (b_zone == trap_z).float())).item()
+                        if task == 'one_way':
+                            totals['type_score'] += (b_guess == prey_t).float().item()
+                            totals['terminal_success'] += ((a_zone == prey_z) & (b_zone == trap_z) & (b_guess == prey_t)).float().item()
+                        else:
+                            totals['type_score'] += (0.5 * ((a_guess == trap_t).float() + (b_guess == prey_t).float())).item()
+                            totals['terminal_success'] += ((a_zone == prey_z) & (b_zone == trap_z) & (a_guess == trap_t) & (b_guess == prey_t) & (prey_t != trap_t)).float().item()
+                        count += 1
+    return {k: v / max(1, count) for k, v in totals.items()}
+
+
 def _protocol_diagnostics(a, b, task, rounds=2, vocab=8, zones=4, type_count=3,
                           use_messages=True):
     """Separate production purity, oracle comprehension and do(token) effect."""
@@ -160,7 +204,7 @@ def run(seed=0, episodes=3000, rounds=2, vocab=8, zones=4, use_messages=True,
         message_temperature=0.7, differentiable_messages=False,
         communication_task='symmetric', curriculum=False, type_count=3,
         coupled=False, receiver_aux=0.0, sender_aux=0.0,
-        receiver_bootstrap_episodes=0, hidden_dim=32):
+        receiver_bootstrap_episodes=0, hidden_dim=32, holdout_mod=0):
     if communication_task not in ('symmetric', 'one_way'):
         raise ValueError('communication_task must be symmetric or one_way')
     torch.manual_seed(seed); torch.set_num_threads(1)
@@ -196,10 +240,14 @@ def run(seed=0, episodes=3000, rounds=2, vocab=8, zones=4, use_messages=True,
     state_rng = torch.Generator().manual_seed(seed + 1000003)
     records=[]; recent=[]; start=time.perf_counter()
     for ep in range(1, episodes+1):
-        prey_t = torch.randint(type_count, (1,), generator=state_rng)
-        prey_z = torch.randint(zones, (1,), generator=state_rng)
-        trap_t = torch.randint(type_count, (1,), generator=state_rng)
-        trap_z = torch.randint(zones, (1,), generator=state_rng)
+        while True:
+            prey_t = torch.randint(type_count, (1,), generator=state_rng)
+            prey_z = torch.randint(zones, (1,), generator=state_rng)
+            trap_t = torch.randint(type_count, (1,), generator=state_rng)
+            trap_z = torch.randint(zones, (1,), generator=state_rng)
+            if not holdout_mod or not (_pair_is_held_out(prey_t.item(), prey_z.item(), zones, holdout_mod) or
+                                       _pair_is_held_out(trap_t.item(), trap_z.item(), zones, holdout_mod)):
+                break
         last_a = torch.zeros(1,vocab); last_b = torch.zeros(1,vocab)
         logs=[]; values=[]; aux_losses=[]; sender_losses=[]
         active_task = ('one_way' if curriculum and ep <= episodes // 2
@@ -299,8 +347,10 @@ def run(seed=0, episodes=3000, rounds=2, vocab=8, zones=4, use_messages=True,
             'coupled': coupled, 'receiver_aux': receiver_aux, 'sender_aux': sender_aux,
             'receiver_bootstrap_episodes': receiver_bootstrap_episodes,
             'hidden_dim': hidden_dim,
+            'holdout_mod': holdout_mod,
             'seconds':time.perf_counter()-start,'history':records,
             'fixed_grid_eval': _fixed_grid_eval(a, b, eval_task, rounds, vocab, zones, type_count, use_messages),
+            'heldout_grid_eval': _heldout_grid_eval(a, b, eval_task, rounds, vocab, zones, type_count, use_messages, holdout_mod),
             'protocol_diagnostics': _protocol_diagnostics(a, b, eval_task, rounds, vocab, zones, type_count, use_messages)}
 
 
@@ -384,9 +434,10 @@ def main():
     p.add_argument('--type-count',type=int,default=3); p.add_argument('--zones',type=int,default=4)
     p.add_argument('--rounds',type=int,default=2)
     p.add_argument('--hidden-dim',type=int,default=32)
+    p.add_argument('--holdout-mod',type=int,default=0)
     args=p.parse_args(); out=Path(args.output); out.parent.mkdir(parents=True,exist_ok=True); all=[]
     for s in args.seeds:
         for m in (True,False):
-            r=run(s,args.episodes,rounds=args.rounds,zones=args.zones,type_count=args.type_count,use_messages=m,communication_task=args.task,curriculum=args.curriculum,coupled=args.coupled,receiver_aux=args.receiver_aux,sender_aux=args.sender_aux,receiver_bootstrap_episodes=args.receiver_bootstrap,hidden_dim=args.hidden_dim); all.append(r); out.write_text(json.dumps(all,indent=2)); print(json.dumps({'seed':s,'messages':m,'task':args.task,'curriculum':args.curriculum,'coupled':args.coupled,'hidden_dim':args.hidden_dim,'last':r['history'][-1],'eval':r['fixed_grid_eval'],'protocol':r['protocol_diagnostics']}),flush=True)
+            r=run(s,args.episodes,rounds=args.rounds,zones=args.zones,type_count=args.type_count,use_messages=m,communication_task=args.task,curriculum=args.curriculum,coupled=args.coupled,receiver_aux=args.receiver_aux,sender_aux=args.sender_aux,receiver_bootstrap_episodes=args.receiver_bootstrap,hidden_dim=args.hidden_dim,holdout_mod=args.holdout_mod); all.append(r); out.write_text(json.dumps(all,indent=2)); print(json.dumps({'seed':s,'messages':m,'task':args.task,'curriculum':args.curriculum,'coupled':args.coupled,'hidden_dim':args.hidden_dim,'holdout_mod':args.holdout_mod,'last':r['history'][-1],'eval':r['fixed_grid_eval'],'heldout':r['heldout_grid_eval'],'protocol':r['protocol_diagnostics']}),flush=True)
 
 if __name__ == '__main__': main()

@@ -26,4 +26,12 @@ class MultiRoundLearningTests(unittest.TestCase):
         self.assertEqual(last_a.argmax().item(), 1)
         self.assertEqual(float(last_b.sum()), 0.0)
 
+    def test_holdout_split_is_evaluated(self):
+        r = run(seed=3, episodes=30, holdout_mod=3, hidden_dim=16,
+                communication_task='symmetric', coupled=True)
+        self.assertIsNotNone(r['heldout_grid_eval'])
+        self.assertEqual(set(r['heldout_grid_eval']),
+                         {'zone_score', 'type_score', 'terminal_success'})
+        self.assertTrue(all(0.0 <= v <= 1.0 for v in r['heldout_grid_eval'].values()))
+
 if __name__ == '__main__': unittest.main()
