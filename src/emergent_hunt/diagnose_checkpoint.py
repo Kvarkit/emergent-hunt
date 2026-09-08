@@ -7,17 +7,63 @@ import torch
 from .train import SlotSender, SlotReceiver, BagReceiver, mlp, features
 from .intervention import build_rows, control_summary
 
-# architecture tag -> receiver constructor. Every entry that trains a
-# non-default receiver class (see train.run) must have a matching branch
-# here, or load_state_dict fails on the generic mlp(19, ...) shape/keys
-# (melioralab-agent #25638: bag_receiver fell through to this default and
-# raised on state_dict keys net.0.weight/net.0.bias/net.2.weight/net.2.bias
-# vs the mlp's own 0.weight/0.bias/2.weight/2.bias).
-_RECEIVER_BY_ARCHITECTURE = {
-    'slots': lambda head: SlotReceiver(),
-    'receiver_slots': lambda head: SlotReceiver(),
-    'bag_receiver': lambda head: BagReceiver(),
+# architecture tag -> (sender constructor, receiver constructor(head)).
+# This is a REGISTRY, not a fallback chain (nadir-codex #25734, gate 1): every
+# tag train.run() can write under --architecture must have an explicit entry
+# here, and an unrecognized or missing tag is a hard error, not a silent
+# generic-mlp guess. Before this was a registry, bag_receiver had no entry
+# and fell through to the generic-mlp branch by default: load_state_dict
+# raised on mismatched keys (net.0.weight vs 0.weight -- melioralab-agent
+# #25638), but a DIFFERENT unlucky shape collision could have loaded wrong
+# weights silently instead of raising. A closed registry can't do that: any
+# tag not listed below is refused before torch ever sees the state_dict.
+_NETWORK_BY_ARCHITECTURE = {
+    'mlp': (lambda: mlp(6, 16), lambda head: mlp(19, 6 if head == 'factorized' else 9)),
+    'slots': (lambda: SlotSender(), lambda head: SlotReceiver()),
+    'receiver_slots': (lambda: mlp(6, 16), lambda head: SlotReceiver()),
+    'bag_receiver': (lambda: mlp(6, 16), lambda head: BagReceiver()),
 }
+
+
+def build_networks(architecture, head):
+    """Registry lookup (see _NETWORK_BY_ARCHITECTURE). Raises ValueError on
+    any tag not explicitly listed -- never guesses a generic shape."""
+    if architecture not in _NETWORK_BY_ARCHITECTURE:
+        raise ValueError(
+            f'unknown architecture tag {architecture!r}; diagnose_checkpoint '
+            f'has no registered reconstructor for it (known: '
+            f'{sorted(_NETWORK_BY_ARCHITECTURE)}). Add one instead of '
+            f'guessing a shape -- a wrong guess that happens to load without '
+            f'raising is worse than one that raises (#25734).')
+    build_sender, build_receiver = _NETWORK_BY_ARCHITECTURE[architecture]
+    return build_sender(), build_receiver(head)
+
+
+@torch.no_grad()
+def fixed_probe_signature(sender, receiver, head, n=3):
+    """Identity check (nadir-codex #25734, gate 2): a hash of this network's
+    greedy outputs over the full corpus for fixed inputs, independent of and
+    stronger than 'load_state_dict did not raise'. Two receivers can be
+    shape-compatible (same parameter names and tensor shapes) while wiring
+    the same weights to different inputs -- load_state_dict succeeds on
+    both, but their outputs on the same probe differ. That is exactly what
+    this signature is for: it is deterministic (eval mode, argmax, no
+    sampling) and independent of the intervention corpus construction, so it
+    is not circular with what diagnose() itself reports.
+    """
+    sender.eval()
+    receiver.eval()
+    outputs = []
+    for p in range(n):
+        for d in range(n):
+            sent = tuple(sender(features(torch.tensor([[p, d]]), 3)).view(2, 8).argmax(-1).tolist())
+            wire = features(torch.tensor([sent]), 8)
+            for t in range(n):
+                logits = receiver(torch.cat((features(torch.tensor([[t]]), n), wire), -1))
+                action = (logits.view(2, 3).argmax(-1).tolist() if head == 'factorized'
+                          else [logits.argmax(-1).item()])
+                outputs.append((p, d, t, sent, tuple(action)))
+    return hashlib.sha256(repr(outputs).encode()).hexdigest()
 
 
 def diagnose(path):
@@ -26,14 +72,12 @@ def diagnose(path):
     saved = torch.load(path, map_location='cpu', weights_only=True)
     head = saved['head']
     architecture = saved['architecture']
-    sender = SlotSender() if architecture == 'slots' else mlp(6, 16)
-    build_receiver = _RECEIVER_BY_ARCHITECTURE.get(
-        architecture, lambda h: mlp(19, 6 if h == 'factorized' else 9))
-    receiver = build_receiver(head)
+    sender, receiver = build_networks(architecture, head)
     sender.load_state_dict(saved['sender'])
     receiver.load_state_dict(saved['receiver'])
     sender.eval()
     receiver.eval()
+    network_signature = fixed_probe_signature(sender, receiver, head)
 
     @torch.no_grad()
     def send(p, d):
@@ -57,7 +101,8 @@ def diagnose(path):
         row['training_reward'] = saved['reward_kind']
     assert len(rows) == 162
     assert all(r['sent_before'] == r['sent_after'] for r in rows if r['factor'] == 't')
-    return {'checkpoint_sha256':digest, 'summary':control_summary(rows), 'rows':rows}
+    return {'checkpoint_sha256': digest, 'network_signature': network_signature,
+            'summary': control_summary(rows), 'rows': rows}
 
 
 if __name__ == '__main__':

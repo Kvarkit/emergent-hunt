@@ -3,8 +3,9 @@ import unittest
 from pathlib import Path
 
 import torch
+from torch import nn
 
-from emergent_hunt.diagnose_checkpoint import diagnose
+from emergent_hunt.diagnose_checkpoint import diagnose, build_networks, fixed_probe_signature
 from emergent_hunt.train import SlotSender, SlotReceiver, BagReceiver, mlp
 
 
@@ -50,6 +51,60 @@ class DiagnoseCheckpointTests(unittest.TestCase):
         generic = mlp(19, 6)
         with self.assertRaises((RuntimeError, ValueError)):
             generic.load_state_dict(bag.state_dict())
+
+    # --- nadir-codex #25734 gate 1: registry, not a fallback chain --------
+
+    def test_unknown_architecture_tag_is_rejected(self):
+        with self.assertRaises(ValueError):
+            build_networks('typo_architecture', head='factorized')
+
+    def test_every_train_cli_architecture_choice_is_registered(self):
+        # train.py's --architecture choices are the ground truth for which
+        # tags a checkpoint can legitimately carry; every one of them must
+        # build without raising, or a valid checkpoint would be rejected.
+        for architecture in ('mlp', 'slots', 'receiver_slots', 'bag_receiver'):
+            build_networks(architecture, head='factorized')  # must not raise
+
+    # --- nadir-codex #25734 gate 2: identity negative control -------------
+
+    class _WrongOrderBagReceiver(nn.Module):
+        """Same parameter names/shapes as BagReceiver (net = mlp(11, 6)), so
+        the SAME state_dict loads into it without error -- but it feeds the
+        trap one-hot and the pooled message bag to the linear layer in the
+        opposite order, so a real BagReceiver's weights are wired to the
+        wrong inputs here. This is the shape-compatible-but-wrong decoder
+        nadir-codex #25649/#25734 asked for as a negative control."""
+        def __init__(self):
+            super().__init__()
+            self.net = mlp(11, 6)
+
+        def forward(self, x):
+            return self.net(torch.cat((x[:, 3:].view(-1, 2, 8).sum(1), x[:, :3]), -1))
+
+    def test_shape_compatible_wrong_decoder_is_caught_by_output_signature(self):
+        # The failure mode gate 1 alone cannot catch: two receiver classes
+        # can have identical state_dict keys and shapes (load_state_dict
+        # raises on neither) while computing different functions. Only
+        # comparing actual outputs on a fixed probe -- not "did loading
+        # succeed" -- catches this.
+        real = BagReceiver()
+        wrong = self._WrongOrderBagReceiver()
+        wrong.load_state_dict(real.state_dict())  # succeeds: same keys/shapes
+        sender = mlp(6, 16)
+
+        sig_real = fixed_probe_signature(sender, real, head='factorized')
+        sig_wrong = fixed_probe_signature(sender, wrong, head='factorized')
+        self.assertNotEqual(sig_real, sig_wrong,
+                             'wrong-order decoder produced the same signature as the '
+                             'real one -- fixed_probe_signature failed to catch a '
+                             'shape-compatible identity mismatch')
+
+    def test_round_trip_signature_is_stable_and_deterministic(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = _save(tmp, 'bag_receiver')
+            report1 = diagnose(str(path))
+            report2 = diagnose(str(path))
+            self.assertEqual(report1['network_signature'], report2['network_signature'])
 
 
 if __name__ == '__main__':

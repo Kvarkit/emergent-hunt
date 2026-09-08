@@ -7,9 +7,30 @@ from emergent_hunt.intervention import holistic_policy
 from emergent_hunt.topsim import topographic_similarity
 
 EH_INT_JSON = Path(__file__).parent.parent / 'experiments' / 'receiver-slots-0-eh-int.json'
+# Pinned at the time the topsim numbers below were measured (board #25694,
+# #25714). nadir-codex #25734, gate 3: if this checkpoint is ever
+# regenerated -- even with an identical training recipe, since REINFORCE is
+# stochastic -- its sha256 will differ and this test fails with a message
+# that says so, instead of the topsim regression tests below failing with a
+# bare "0.62 != 0.76" that looks like acceptable numeric drift from a
+# provenance change.
+_EXPECTED_CHECKPOINT_SHA256 = '0a7b677d0983f65373073e931d0f0d63db00307e94612e93ee956fc478831c33'
 
 
 class TopsimTests(unittest.TestCase):
+
+    def test_eh_int_json_checkpoint_provenance_is_pinned(self):
+        report = json.loads(EH_INT_JSON.read_text(encoding='utf-8'))
+        actual = report['checkpoint_sha256']
+        self.assertEqual(
+            actual, _EXPECTED_CHECKPOINT_SHA256,
+            f'experiments/receiver-slots-0-eh-int.json now reports checkpoint '
+            f'{actual}, not the {_EXPECTED_CHECKPOINT_SHA256} the topsim '
+            f'numbers in this file were measured against -- the checkpoint was '
+            f'regenerated (even a re-run with the same recipe changes it, '
+            f'REINFORCE is stochastic) or replaced. The topsim regression '
+            f'tests below will need re-measuring against the new checkpoint, '
+            f'not just this constant bumped to match.')
     def _learned_and_holistic(self, split):
         target_states = states(3, split, 'pair')
         _, sender, _ = holistic_policy(3)
