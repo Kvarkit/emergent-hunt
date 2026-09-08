@@ -32,12 +32,12 @@ class MultiRoundTests(unittest.TestCase):
         with self.assertRaises(ValueError): e.act(0, 99)
 
     def test_trap_type_can_change_success(self):
-        e = MultiRoundHunt(rounds=1, seed=1)
+        e = MultiRoundHunt(rounds=2, seed=1)
         e.reset()
         e.state = type(e.state)(e.state.prey_type, 1, e.state.prey_type, 2)
         e.send(0, 0); e.send(1, 0); e.act(0, 1)
         reward, done, info = e.act(1, 2)
-        self.assertTrue(done)
+        self.assertFalse(done)
         self.assertFalse(info['success'])
         self.assertEqual(reward, 0.0)
 
