@@ -20,6 +20,26 @@ def mlp(inputs, outputs):
     return nn.Sequential(nn.Linear(inputs, 32), nn.Tanh(), nn.Linear(32, outputs))
 
 
+class SlotSender(nn.Module):
+    """Explicit factor/position prior; token meanings are learned from reward."""
+    def __init__(self):
+        super().__init__()
+        self.slots = nn.ModuleList([mlp(3, 8), mlp(3, 8)])
+
+    def forward(self, x):
+        return torch.cat([net(x[:, i*3:(i+1)*3]) for i, net in enumerate(self.slots)], -1)
+
+
+class SlotReceiver(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.slots = nn.ModuleList([mlp(8, 3), mlp(8, 3)])
+
+    def forward(self, x):
+        # Trap is irrelevant to predicting prey/direction; copy occurs outside.
+        return torch.cat([net(x[:, 3+i*8:3+(i+1)*8]) for i, net in enumerate(self.slots)], -1)
+
+
 def corpus(split, by='triple'):
     return torch.tensor([(s.prey, s.direction, s.trap) for s in states(split=split, by=by)])
 
@@ -57,10 +77,14 @@ def evaluate(sender, receiver, mode, by='triple', head='joint'):
     return result
 
 
-def run(seed=0, mode='communication', steps=2000, batch=128, by='triple', head='joint', reward_kind='exact'):
+def run(seed=0, mode='communication', steps=2000, batch=128, by='triple', head='joint', reward_kind='exact', architecture='mlp', checkpoint=None):
     torch.manual_seed(seed)
     torch.set_num_threads(1)
     sender, receiver, critic = mlp(6, 16), mlp(19, 6 if head == 'factorized' else 9), mlp(9, 1)
+    if architecture == 'slots':
+        if head != 'factorized':
+            raise ValueError('slots requires factorized head')
+        sender, receiver = SlotSender(), SlotReceiver()
     optimizer = torch.optim.Adam(list(sender.parameters()) + list(receiver.parameters()) + list(critic.parameters()), lr=.003)
     data = corpus('train', by)
     history = []
@@ -106,7 +130,12 @@ def run(seed=0, mode='communication', steps=2000, batch=128, by='triple', head='
                    'critic_mse':critic_loss.item(), 'entropy':entropy.mean().item(), 'grad_norm':grad.item(),
                    'evaluation':evaluate(sender, receiver, mode, by, head)}
             history.append(row)
-    return {'seed':seed, 'mode':mode, 'by':by, 'head':head, 'reward_kind':reward_kind, 'steps':steps, 'batch':batch,
+    if checkpoint:
+        torch.save({'sender':sender.state_dict(), 'receiver':receiver.state_dict(),
+                    'critic':critic.state_dict(), 'architecture':architecture, 'head':head,
+                    'seed':seed, 'mode':mode, 'by':by, 'reward_kind':reward_kind,
+                    'steps':steps}, checkpoint)
+    return {'seed':seed, 'mode':mode, 'by':by, 'head':head, 'architecture':architecture, 'reward_kind':reward_kind, 'steps':steps, 'batch':batch,
             'episodes':steps*batch, 'seconds':time.perf_counter()-start,
             'torch':torch.__version__, 'initial':initial, 'history':history}
 
@@ -119,15 +148,20 @@ def main():
     parser.add_argument('--by', choices=['triple', 'pair'], default='triple')
     parser.add_argument('--head', choices=['joint', 'factorized'], default='joint')
     parser.add_argument('--reward', choices=['exact', 'factor'], default='exact')
+    parser.add_argument('--architecture', choices=['mlp', 'slots'], default='mlp')
     args = parser.parse_args()
     if args.steps < 1:
         parser.error('steps must be positive')
+    if args.architecture == 'slots' and args.head != 'factorized':
+        parser.error('slots requires --head factorized')
     results = []
     target = Path(args.output)
     target.parent.mkdir(parents=True, exist_ok=True)
     for seed in args.seeds:
         for mode in ('communication', 'no_message'):
-            r = run(seed, mode, args.steps, by=args.by, head=args.head, reward_kind=args.reward)
+            checkpoint = target.with_name(f'{target.stem}-{seed}-{mode}.pt')
+            r = run(seed, mode, args.steps, by=args.by, head=args.head, reward_kind=args.reward,
+                    architecture=args.architecture, checkpoint=checkpoint)
             results.append(r)
             target.write_text(json.dumps(results, indent=2), encoding='utf-8')
             print(json.dumps({'seed':seed,'mode':mode,'seconds':r['seconds'], 'last':r['history'][-1]}), flush=True)

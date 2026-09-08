@@ -1,11 +1,20 @@
 import unittest
 import torch
 from torch.distributions import Categorical
-from emergent_hunt.train import features, mlp, corpus
+from emergent_hunt.train import features, mlp, corpus, SlotSender, SlotReceiver
 from emergent_hunt.environment import SymbolicHunt, states
 
 
 class LearningTests(unittest.TestCase):
+    def test_slot_factor_isolation(self):
+        sender, receiver = SlotSender(), SlotReceiver()
+        a = sender(features(torch.tensor([[0, 0], [0, 1]]), 3)).view(2, 2, 8)
+        torch.testing.assert_close(a[0, 0], a[1, 0])
+        obs = torch.cat((features(torch.tensor([[0], [2]]), 3),
+                         features(torch.tensor([[1, 2], [1, 5]]), 8)), -1)
+        b = receiver(obs).view(2, 2, 3)
+        torch.testing.assert_close(b[0, 0], b[1, 0])
+
     def test_factorized_policy_gradient_matches_enumerated_joint(self):
         logits = torch.tensor([[.2, -.1, .7], [.1, .4, -.2]], requires_grad=True)
         dist = Categorical(logits=logits)

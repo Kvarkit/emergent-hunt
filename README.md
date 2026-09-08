@@ -21,6 +21,9 @@ The stronger [pair-held-out experiment](experiments/pair-smoke.md) reaches 100%
 train but 0% held-out across three seeds, exposing the current transfer limit.
 Further [factorized-action and reward ablations](experiments/factorized-smoke.md)
 show transfer in only one of three seeds with partial reward; grammar remains unproven.
+An explicit [factor-isolated positive control](experiments/slots-smoke.md)
+achieves 100% held-out across three seeds; its slot grammar is imposed, while
+token meanings are learned. Frozen-checkpoint EH-INT export is available.
 Successful coordination alone will not be treated as evidence of grammar.
 
 ## Layout

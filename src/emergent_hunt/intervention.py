@@ -103,8 +103,9 @@ def _run(policy_name, sender, receiver, state, n):
     return sent, received, action, correct, reward
 
 
-def build_rows(n=3, seed=0):
-    policies = [handwritten_policy(), holistic_policy(n), no_message_policy()]
+def build_rows(n=3, seed=0, policies=None, checkpoint=None):
+    if policies is None:
+        policies = [handwritten_policy(), holistic_policy(n), no_message_policy()]
     pairs = counterfactual_pairs(n)
     rows = []
     for policy_name, sender, receiver in policies:
@@ -118,7 +119,7 @@ def build_rows(n=3, seed=0):
                           (sent_after[i] if i < len(sent_after) else None)]
             rows.append({
                 'protocol': 'EH-INT-r0.1',
-                'checkpoint': None, 'config': f'n={n},vocabulary=8,max_length=2', 'seed': seed,
+                'checkpoint': checkpoint, 'config': f'n={n},vocabulary=8,max_length=2', 'seed': seed,
                 'policy': policy_name,
                 'factor': factor,
                 'base': asdict(base), 'counterfactual': asdict(cf),
