@@ -26,7 +26,11 @@ achieves 100% held-out across three seeds; its slot grammar is imposed, while
 token meanings are learned. Frozen-checkpoint EH-INT export is available.
 The next environment contract is now implemented in `multiround.py`: multiple
 prey/trap types, private zones, alternating A→B messages, two actions and two
-rounds. It is invariant-tested and intentionally has no trainer yet.
+rounds. The matched trainer in `train_multiround.py` makes the action
+`(own_zone, guess_partner_type)` so communication can affect reward, and logs
+zone/type/terminal components separately. The 10k-episode causal baseline is
+still negative: terminal success stayed at zero and messages did not reliably
+beat the no-message control; see `results/multiround-full-10000.json`.
 The proposed transition to evolving multi-step state, partial reward and
 preference-sensitive target choice is specified in
 [`experiments/multistep-protocol.md`](experiments/multistep-protocol.md).
