@@ -8,7 +8,7 @@ from pathlib import Path
 import torch
 from torch import nn
 
-from emergent_hunt.diagnose_checkpoint import diagnose, build_networks, fixed_probe_signature
+from emergent_hunt.diagnose_checkpoint import diagnose, build_networks, fixed_probe_signature, verify, IdentityMismatch
 from emergent_hunt.train import SlotSender, SlotReceiver, BagReceiver, mlp
 
 
@@ -162,6 +162,85 @@ class DiagnoseCheckpointTests(unittest.TestCase):
                 'state_dict shape) produced the same network_signature as the real '
                 'one when loaded in a fresh subprocess -- strict state_dict load '
                 'alone cannot catch this, and neither did the identity check')
+
+    # --- nadir-codex #25800: a differing signature must REJECT, not just be
+    # reported -------------------------------------------------------------
+
+    def test_verify_accepts_matching_checkpoint(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = _save(tmp, 'bag_receiver')
+            baseline = diagnose(str(path))
+            report = verify(str(path), baseline['checkpoint_sha256'], baseline['network_signature'])
+            self.assertEqual(report['network_signature'], baseline['network_signature'])
+
+    def test_verify_rejects_signature_mismatch(self):
+        # nadir-codex #25800's exact falsifier: pin the expected signature of
+        # the real checkpoint's architecture, then feed verify() a
+        # shape-compatible forged decoder saved under the same tag. A
+        # verifier that only checks "does diagnose() return a 64-hex
+        # digest" would pass this; verify() must not.
+        with tempfile.TemporaryDirectory() as tmp:
+            real_path = _save(tmp, 'bag_receiver')
+            expected = diagnose(str(real_path))['network_signature']
+
+            wrong = self._WrongOrderBagReceiver()
+            wrong.load_state_dict(BagReceiver().state_dict())
+            forged_path = Path(tmp) / 'forged.pt'
+            torch.save({'sender': mlp(6, 16).state_dict(), 'receiver': wrong.state_dict(),
+                        'critic': mlp(9, 1).state_dict(), 'architecture': 'bag_receiver',
+                        'head': 'factorized', 'seed': 0, 'mode': 'communication', 'by': 'pair',
+                        'reward_kind': 'exact', 'steps': 0}, forged_path)
+
+            with self.assertRaises(IdentityMismatch):
+                verify(str(forged_path), expect_network_signature=expected)
+
+    def test_verify_rejects_checkpoint_sha256_mismatch(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = _save(tmp, 'mlp')
+            with self.assertRaises(IdentityMismatch):
+                verify(str(path), expect_checkpoint_sha256='0' * 64)
+
+    def test_cli_exits_nonzero_and_rejects_on_signature_mismatch(self):
+        # The fail-closed path nadir-codex #25800 asked to see demonstrated:
+        # a fresh subprocess, given --expect-network-signature for the real
+        # checkpoint's architecture, must refuse (nonzero exit, no report
+        # written) when pointed at the forged one -- not silently write a
+        # report carrying a different-but-unenforced digest.
+        with tempfile.TemporaryDirectory() as tmp:
+            real_path = _save(tmp, 'bag_receiver')
+            expected = diagnose(str(real_path))['network_signature']
+
+            wrong = self._WrongOrderBagReceiver()
+            wrong.load_state_dict(BagReceiver().state_dict())
+            forged_path = Path(tmp) / 'forged.pt'
+            torch.save({'sender': mlp(6, 16).state_dict(), 'receiver': wrong.state_dict(),
+                        'critic': mlp(9, 1).state_dict(), 'architecture': 'bag_receiver',
+                        'head': 'factorized', 'seed': 0, 'mode': 'communication', 'by': 'pair',
+                        'reward_kind': 'exact', 'steps': 0}, forged_path)
+            output = Path(tmp) / 'should_not_be_written.json'
+
+            result = subprocess.run(
+                [sys.executable, '-m', 'emergent_hunt.diagnose_checkpoint', str(forged_path),
+                 '--output', str(output), '--expect-network-signature', expected],
+                cwd=Path(__file__).parent.parent / 'src', capture_output=True, text=True)
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn('REJECT', result.stderr)
+            self.assertFalse(output.exists(),
+                              'diagnose_checkpoint wrote a report for a checkpoint that '
+                              'failed identity verification')
+
+    def test_cli_exits_zero_when_signature_matches(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = _save(tmp, 'bag_receiver')
+            expected = diagnose(str(path))['network_signature']
+            output = Path(tmp) / 'report.json'
+            result = subprocess.run(
+                [sys.executable, '-m', 'emergent_hunt.diagnose_checkpoint', str(path),
+                 '--output', str(output), '--expect-network-signature', expected],
+                cwd=Path(__file__).parent.parent / 'src', capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertTrue(output.exists())
 
 
 if __name__ == '__main__':

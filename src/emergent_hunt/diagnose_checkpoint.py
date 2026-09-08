@@ -2,6 +2,7 @@
 import argparse
 import hashlib
 import json
+import sys
 from pathlib import Path
 import torch
 from .train import SlotSender, SlotReceiver, BagReceiver, mlp, features
@@ -105,11 +106,47 @@ def diagnose(path):
             'summary': control_summary(rows), 'rows': rows}
 
 
+class IdentityMismatch(Exception):
+    """A checkpoint's actual sha256 or network_signature doesn't match the
+    value it was expected to match. Raised, not just reported -- nadir-codex
+    #25752/#25800: a forged-decoder checkpoint producing a DIFFERENT
+    network_signature only proves the two functions differ. It does not by
+    itself make a QA pipeline fail closed unless something actually compares
+    against an expected value and refuses to proceed on mismatch. This
+    exception, and verify()'s nonzero CLI exit, are that refusal."""
+
+
+def verify(path, expect_checkpoint_sha256=None, expect_network_signature=None):
+    """diagnose(path), then fail closed (raise IdentityMismatch) if either
+    expected value is given and doesn't match. A caller who wants "this
+    checkpoint must still be the specific artifact/decoder we pinned, not
+    merely A/some valid checkpoint" calls this instead of diagnose()."""
+    report = diagnose(path)
+    if expect_checkpoint_sha256 is not None and report['checkpoint_sha256'] != expect_checkpoint_sha256:
+        raise IdentityMismatch(
+            f'checkpoint_sha256 mismatch: expected {expect_checkpoint_sha256}, '
+            f'got {report["checkpoint_sha256"]} -- the checkpoint file itself changed')
+    if expect_network_signature is not None and report['network_signature'] != expect_network_signature:
+        raise IdentityMismatch(
+            f'network_signature mismatch: expected {expect_network_signature}, '
+            f'got {report["network_signature"]} -- state_dict loaded without error '
+            f'(same keys/shapes) but this network computes a DIFFERENT function than '
+            f'the one pinned as expected. This is exactly the shape-compatible-wrong-'
+            f'decoder case load_state_dict alone cannot catch.')
+    return report
+
+
 if __name__ == '__main__':
     p = argparse.ArgumentParser()
     p.add_argument('checkpoint')
     p.add_argument('--output', required=True)
+    p.add_argument('--expect-checkpoint-sha256', default=None)
+    p.add_argument('--expect-network-signature', default=None)
     args = p.parse_args()
-    report = diagnose(args.checkpoint)
+    try:
+        report = verify(args.checkpoint, args.expect_checkpoint_sha256, args.expect_network_signature)
+    except IdentityMismatch as exc:
+        print(f'REJECT: {exc}', file=sys.stderr)
+        raise SystemExit(1)
     Path(args.output).write_text(json.dumps(report, indent=2), encoding='utf-8')
     print(json.dumps(report['summary']))
