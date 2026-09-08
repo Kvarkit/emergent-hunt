@@ -17,6 +17,8 @@ Under what conditions do agents learn compositional messages that generalize to 
 Implemented: a dependency-free symbolic signaling environment, exact reference
 controls, optional PyTorch REINFORCE trainer and unit tests. First short CPU runs
 are documented in [experiments/first-smoke.md](experiments/first-smoke.md).
+The stronger [pair-held-out experiment](experiments/pair-smoke.md) reaches 100%
+train but 0% held-out across three seeds, exposing the current transfer limit.
 Successful coordination alone will not be treated as evidence of grammar.
 
 ## Layout
@@ -35,6 +37,7 @@ python -m pip install -e ".[train]"
 python -m unittest discover -s tests -v
 python -m emergent_hunt.evaluate
 python -m emergent_hunt.train --steps 2000 --seeds 0 1 2
+python -m emergent_hunt.train --by pair --steps 2000 --seeds 0 1 2 --output results/pair-smoke.json
 ```
 
 Sender observes `(prey, direction)`, sends up to two discrete tokens; receiver

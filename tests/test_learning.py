@@ -1,11 +1,17 @@
 import unittest
 import torch
 from torch.distributions import Categorical
-from emergent_hunt.train import features, mlp
+from emergent_hunt.train import features, mlp, corpus
 from emergent_hunt.environment import SymbolicHunt, states
 
 
 class LearningTests(unittest.TestCase):
+    def test_training_corpus_excludes_heldout_sender_pairs(self):
+        train = {tuple(row[:2]) for row in corpus('train', 'pair').tolist()}
+        test = {tuple(row[:2]) for row in corpus('test', 'pair').tolist()}
+        self.assertEqual((len(train), len(test)), (6, 3))
+        self.assertFalse(train & test)
+
     def test_reinforce_gradient_matches_exact_expected_reward(self):
         logits = torch.tensor([.2, -.1, .7], requires_grad=True)
         rewards = torch.tensor([0., 1., 0.])

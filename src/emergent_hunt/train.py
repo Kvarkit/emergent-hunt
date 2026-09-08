@@ -20,16 +20,16 @@ def mlp(inputs, outputs):
     return nn.Sequential(nn.Linear(inputs, 32), nn.Tanh(), nn.Linear(32, outputs))
 
 
-def corpus(split):
-    return torch.tensor([(s.prey, s.direction, s.trap) for s in states(split=split)])
+def corpus(split, by='triple'):
+    return torch.tensor([(s.prey, s.direction, s.trap) for s in states(split=split, by=by)])
 
 
 @torch.no_grad()
-def evaluate(sender, receiver, mode):
+def evaluate(sender, receiver, mode, by='triple'):
     result = {}
     code = sender(features(torch.cartesian_prod(torch.arange(3), torch.arange(3)), 3)).view(-1, 2, 8).argmax(-1)
     for split in ('train', 'test', 'all'):
-        x = corpus(split)
+        x = corpus(split, by)
         msg = sender(features(x[:, :2], 3)).view(-1, 2, 8).argmax(-1)
         scores = {}
         for intervention in ('intact', 'mute', 'shuffle'):
@@ -49,15 +49,15 @@ def evaluate(sender, receiver, mode):
     return result
 
 
-def run(seed=0, mode='communication', steps=2000, batch=128):
+def run(seed=0, mode='communication', steps=2000, batch=128, by='triple'):
     torch.manual_seed(seed)
     torch.set_num_threads(1)
     sender, receiver, critic = mlp(6, 16), mlp(19, 9), mlp(9, 1)
     optimizer = torch.optim.Adam(list(sender.parameters()) + list(receiver.parameters()) + list(critic.parameters()), lr=.003)
-    data = corpus('train')
+    data = corpus('train', by)
     history = []
     start = time.perf_counter()
-    initial = evaluate(sender, receiver, mode)
+    initial = evaluate(sender, receiver, mode, by)
     for step in range(1, steps + 1):
         x = data[torch.randint(len(data), (batch,))]
         send_dist = Categorical(logits=sender(features(x[:, :2], 3)).view(-1, 2, 8))
@@ -88,9 +88,9 @@ def run(seed=0, mode='communication', steps=2000, batch=128):
         if step == 1 or step % 200 == 0 or step == steps:
             row = {'step':step, 'sample_reward':reward.mean().item(), 'actor_loss':actor_loss.item(),
                    'critic_mse':critic_loss.item(), 'entropy':entropy.mean().item(), 'grad_norm':grad.item(),
-                   'evaluation':evaluate(sender, receiver, mode)}
+                   'evaluation':evaluate(sender, receiver, mode, by)}
             history.append(row)
-    return {'seed':seed, 'mode':mode, 'steps':steps, 'batch':batch,
+    return {'seed':seed, 'mode':mode, 'by':by, 'steps':steps, 'batch':batch,
             'episodes':steps*batch, 'seconds':time.perf_counter()-start,
             'torch':torch.__version__, 'initial':initial, 'history':history}
 
@@ -100,6 +100,7 @@ def main():
     parser.add_argument('--steps', type=int, default=2000)
     parser.add_argument('--seeds', type=int, nargs='+', default=[0, 1, 2])
     parser.add_argument('--output', default='results/smoke.json')
+    parser.add_argument('--by', choices=['triple', 'pair'], default='triple')
     args = parser.parse_args()
     if args.steps < 1:
         parser.error('steps must be positive')
@@ -108,7 +109,7 @@ def main():
     target.parent.mkdir(parents=True, exist_ok=True)
     for seed in args.seeds:
         for mode in ('communication', 'no_message'):
-            r = run(seed, mode, args.steps)
+            r = run(seed, mode, args.steps, by=args.by)
             results.append(r)
             target.write_text(json.dumps(results, indent=2), encoding='utf-8')
             print(json.dumps({'seed':seed,'mode':mode,'seconds':r['seconds'], 'last':r['history'][-1]}), flush=True)
