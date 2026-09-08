@@ -51,8 +51,8 @@ def _fixed_grid_eval(a, b, task, rounds=2, vocab=8, zones=4, type_count=3):
                             if task == 'symmetric':
                                 last_a, last_b = oh(mb, vocab), oh(ma, vocab)
                             else:
-                                last_a = torch.zeros_like(last_a)
-                                last_b = oh(ma, vocab)
+                                last_a = oh(ma, vocab)
+                                last_b = torch.zeros_like(last_b)
                             _, aa, _, _ = a(pa, last_b)
                             _, ab, _, _ = b(pb, last_a)
                             act_a, act_b = aa.argmax(-1), ab.argmax(-1)
@@ -92,7 +92,7 @@ def _protocol_diagnostics(a, b, task, rounds=2, vocab=8, zones=4, type_count=3):
                             ta, _, _, _ = a(pa, last_b); tb, _, _, _ = b(pb, last_a)
                             ma = ta.argmax(-1); mb = tb.argmax(-1) if task == 'symmetric' else None
                             if task == 'symmetric': last_a, last_b = oh(mb, vocab), oh(ma, vocab)
-                            else: last_a, last_b = torch.zeros_like(last_a), oh(ma, vocab)
+                            else: last_a, last_b = oh(ma, vocab), torch.zeros_like(last_b)
                             _, aa, _, _ = a(pa, last_b); _, ab, _, _ = b(pb, last_a)
                         rows.append((prey_t, trap_t, ma.item(), mb.item() if mb is not None else -1))
 
@@ -222,8 +222,8 @@ def run(seed=0, episodes=3000, rounds=2, vocab=8, zones=4, use_messages=True,
                 if active_task == 'symmetric':
                     last_a, last_b = (oh(mb, vocab), oh(ma, vocab))
                 else:
-                    last_a = torch.zeros_like(last_a)
-                    last_b = oh(ma, vocab)
+                    last_a = oh(ma, vocab)
+                    last_b = torch.zeros_like(last_b)
             else:
                 last_a, last_b = torch.zeros_like(last_a), torch.zeros_like(last_b)
                 message_logs = []
@@ -290,6 +290,72 @@ def run(seed=0, episodes=3000, rounds=2, vocab=8, zones=4, use_messages=True,
             'seconds':time.perf_counter()-start,'history':records,
             'fixed_grid_eval': _fixed_grid_eval(a, b, eval_task, rounds, vocab, zones, type_count),
             'protocol_diagnostics': _protocol_diagnostics(a, b, eval_task, rounds, vocab, zones, type_count)}
+
+
+def run_staged_one_way(seed=0, sender_episodes=1000, receiver_episodes=2000,
+                       joint_episodes=3000, vocab=8, zones=4, type_count=3,
+                       coupled=False):
+    """Canonical sender -> frozen receiver -> joint one-way curriculum."""
+    torch.manual_seed(seed); torch.set_num_threads(1)
+    if coupled:
+        body = nn.Sequential(nn.Linear(type_count + zones + 2 + vocab, 32), nn.Tanh())
+        a = Agent(type_count + zones, vocab, zones * type_count, 2,
+                  type_count=type_count, body=body)
+        b = Agent(type_count + zones, vocab, zones * type_count, 2,
+                  type_count=type_count, body=body)
+    else:
+        a = Agent(type_count + zones, vocab, zones * type_count, 2, type_count=type_count)
+        b = Agent(type_count + zones, vocab, zones * type_count, 2, type_count=type_count)
+
+    def make_params(*modules):
+        out = []; seen = set()
+        for module in modules:
+            for p in module.parameters():
+                if id(p) not in seen: seen.add(id(p)); out.append(p)
+        return out
+
+    # Phase 1: learn a canonical token (token index == private prey type).
+    opt_a = torch.optim.Adam(make_params(a), lr=.003)
+    for _ in range(sender_episodes):
+        prey_t = torch.randint(type_count, (1,)); prey_z = torch.randint(zones, (1,))
+        pa = torch.cat((oh(prey_t, type_count), oh(prey_z, zones), oh(torch.tensor([0]), 2)), -1)
+        token_logits, _, _, _ = a(pa, torch.zeros(1, vocab))
+        loss = cross_entropy(token_logits, prey_t)
+        opt_a.zero_grad(); loss.backward(); opt_a.step()
+
+    # Phase 2: freeze sender and teacher-force its canonical code into B.
+    for p in a.parameters(): p.requires_grad_(False)
+    opt_b = torch.optim.Adam(make_params(b), lr=.003)
+    for _ in range(receiver_episodes):
+        prey_t = torch.randint(type_count, (1,)); trap_t = torch.randint(type_count, (1,))
+        trap_z = torch.randint(zones, (1,))
+        pb = torch.cat((oh(trap_t, type_count), oh(trap_z, zones), oh(torch.tensor([0]), 2)), -1)
+        _, action_logits, _, decode_logits = b(pb, oh(prey_t, vocab))
+        target_action = trap_z * type_count + prey_t
+        loss = cross_entropy(decode_logits, prey_t) + cross_entropy(action_logits, target_action)
+        opt_b.zero_grad(); loss.backward(); opt_b.step()
+
+    # Phase 3: restore joint learning with actual sampled sender tokens.
+    for p in a.parameters(): p.requires_grad_(True)
+    params = make_params(a, b); opt = torch.optim.Adam(params, lr=.001)
+    for _ in range(joint_episodes):
+        prey_t = torch.randint(type_count, (1,)); prey_z = torch.randint(zones, (1,))
+        trap_t = torch.randint(type_count, (1,)); trap_z = torch.randint(zones, (1,))
+        pa = torch.cat((oh(prey_t, type_count), oh(prey_z, zones), oh(torch.tensor([0]), 2)), -1)
+        pb = torch.cat((oh(trap_t, type_count), oh(trap_z, zones), oh(torch.tensor([0]), 2)), -1)
+        ta, _, _, _ = a(pa, torch.zeros(1, vocab)); ma = Categorical(logits=ta).sample()
+        _, action_logits, _, decode_logits = b(pb, oh(ma, vocab))
+        action = Categorical(logits=action_logits).sample()
+        target_action = trap_z * type_count + prey_t
+        reward = (action == target_action).float()
+        loss = (-Categorical(logits=ta).log_prob(ma) * reward.detach() -
+                Categorical(logits=action_logits).log_prob(action) * reward.detach() +
+                0.1 * cross_entropy(decode_logits, prey_t))
+        opt.zero_grad(); loss.backward(); nn.utils.clip_grad_norm_(params, 5); opt.step()
+    return {'seed': seed, 'sender_episodes': sender_episodes,
+            'receiver_episodes': receiver_episodes, 'joint_episodes': joint_episodes,
+            'fixed_grid_eval': _fixed_grid_eval(a, b, 'one_way', 2, vocab, zones, type_count),
+            'protocol_diagnostics': _protocol_diagnostics(a, b, 'one_way', 2, vocab, zones, type_count)}
 
 
 def main():
