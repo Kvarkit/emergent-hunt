@@ -81,10 +81,13 @@ def run(seed=0, mode='communication', steps=2000, batch=128, by='triple', head='
     torch.manual_seed(seed)
     torch.set_num_threads(1)
     sender, receiver, critic = mlp(6, 16), mlp(19, 6 if head == 'factorized' else 9), mlp(9, 1)
-    if architecture == 'slots':
+    if architecture in ('slots', 'receiver_slots'):
         if head != 'factorized':
             raise ValueError('slots requires factorized head')
-        sender, receiver = SlotSender(), SlotReceiver()
+        if architecture == 'slots':
+            sender, receiver = SlotSender(), SlotReceiver()
+        else:
+            receiver = SlotReceiver()
     optimizer = torch.optim.Adam(list(sender.parameters()) + list(receiver.parameters()) + list(critic.parameters()), lr=.003)
     data = corpus('train', by)
     history = []
@@ -148,11 +151,11 @@ def main():
     parser.add_argument('--by', choices=['triple', 'pair'], default='triple')
     parser.add_argument('--head', choices=['joint', 'factorized'], default='joint')
     parser.add_argument('--reward', choices=['exact', 'factor'], default='exact')
-    parser.add_argument('--architecture', choices=['mlp', 'slots'], default='mlp')
+    parser.add_argument('--architecture', choices=['mlp', 'slots', 'receiver_slots'], default='mlp')
     args = parser.parse_args()
     if args.steps < 1:
         parser.error('steps must be positive')
-    if args.architecture == 'slots' and args.head != 'factorized':
+    if args.architecture in ('slots', 'receiver_slots') and args.head != 'factorized':
         parser.error('slots requires --head factorized')
     results = []
     target = Path(args.output)

@@ -14,7 +14,7 @@ def diagnose(path):
     saved = torch.load(path, map_location='cpu', weights_only=True)
     head = saved['head']
     sender = SlotSender() if saved['architecture'] == 'slots' else mlp(6, 16)
-    receiver = SlotReceiver() if saved['architecture'] == 'slots' else mlp(19, 6 if head == 'factorized' else 9)
+    receiver = SlotReceiver() if saved['architecture'] in ('slots', 'receiver_slots') else mlp(19, 6 if head == 'factorized' else 9)
     sender.load_state_dict(saved['sender'])
     receiver.load_state_dict(saved['receiver'])
     sender.eval()

@@ -24,6 +24,9 @@ show transfer in only one of three seeds with partial reward; grammar remains un
 An explicit [factor-isolated positive control](experiments/slots-smoke.md)
 achieves 100% held-out across three seeds; its slot grammar is imposed, while
 token meanings are learned. Frozen-checkpoint EH-INT export is available.
+Relaxing the sender wiring also retains 100% transfer across three seeds:
+[receiver-only isolation](experiments/receiver-slots.md). Receiver position
+semantics remain imposed; word-order emergence has not been demonstrated.
 Successful coordination alone will not be treated as evidence of grammar.
 
 ## Layout
