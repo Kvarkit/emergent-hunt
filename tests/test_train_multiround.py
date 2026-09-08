@@ -1,5 +1,6 @@
 import unittest
-from emergent_hunt.train_multiround import run
+from emergent_hunt.train_multiround import run, _route_messages
+import torch
 
 class MultiRoundLearningTests(unittest.TestCase):
     def test_short_run_finite(self):
@@ -15,5 +16,14 @@ class MultiRoundLearningTests(unittest.TestCase):
         self.assertEqual(r['curriculum'], True)
         self.assertEqual(set(r['fixed_grid_eval']),
                          {'zone_score', 'type_score', 'terminal_success'})
+
+    def test_message_routing_regression(self):
+        ma, mb = torch.tensor([1]), torch.tensor([2])
+        last_a, last_b = _route_messages(ma, mb, 4, 'symmetric', True)
+        self.assertEqual(last_a.argmax().item(), 1)  # B receives A
+        self.assertEqual(last_b.argmax().item(), 2)  # A receives B
+        last_a, last_b = _route_messages(ma, None, 4, 'one_way', True)
+        self.assertEqual(last_a.argmax().item(), 1)
+        self.assertEqual(float(last_b.sum()), 0.0)
 
 if __name__ == '__main__': unittest.main()

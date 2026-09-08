@@ -10,6 +10,15 @@ from torch.nn.functional import one_hot, gumbel_softmax, cross_entropy
 def oh(x, n): return one_hot(x, n).float()
 
 
+def _route_messages(ma, mb, vocab, task, use_messages=True):
+    """Return (last_a, last_b), i.e. input for B and A respectively."""
+    if not use_messages:
+        return torch.zeros(1, vocab), torch.zeros(1, vocab)
+    if task == 'symmetric':
+        return oh(ma, vocab), oh(mb, vocab)
+    return oh(ma, vocab), torch.zeros(1, vocab)
+
+
 class Agent(nn.Module):
     def __init__(self, private_dim, vocab, action_dim, marker_dim=3, type_count=3,
                  hidden_dim=32, body=None):
@@ -50,14 +59,7 @@ def _fixed_grid_eval(a, b, task, rounds=2, vocab=8, zones=4, type_count=3,
                             tb, _, _, _ = b(pb, last_a)
                             ma = ta.argmax(-1)
                             mb = tb.argmax(-1) if task == 'symmetric' else None
-                            if task == 'symmetric' and use_messages:
-                                # A reads last_b, B reads last_a: each must
-                                # receive the partner's token.
-                                last_a, last_b = oh(ma, vocab), oh(mb, vocab)
-                            elif task == 'one_way' and use_messages:
-                                last_a, last_b = oh(ma, vocab), torch.zeros_like(last_b)
-                            else:
-                                last_a, last_b = torch.zeros_like(last_a), torch.zeros_like(last_b)
+                            last_a, last_b = _route_messages(ma, mb, vocab, task, use_messages)
                             _, aa, _, _ = a(pa, last_b)
                             _, ab, _, _ = b(pb, last_a)
                             act_a, act_b = aa.argmax(-1), ab.argmax(-1)
@@ -97,12 +99,7 @@ def _protocol_diagnostics(a, b, task, rounds=2, vocab=8, zones=4, type_count=3,
                             pb = torch.cat((oh(torch.tensor([trap_t]), type_count), oh(torch.tensor([trap_z]), zones), marker), -1)
                             ta, _, _, _ = a(pa, last_b); tb, _, _, _ = b(pb, last_a)
                             ma = ta.argmax(-1); mb = tb.argmax(-1) if task == 'symmetric' else None
-                            if task == 'symmetric' and use_messages:
-                                last_a, last_b = oh(ma, vocab), oh(mb, vocab)
-                            elif task == 'one_way' and use_messages:
-                                last_a, last_b = oh(ma, vocab), torch.zeros_like(last_b)
-                            else:
-                                last_a, last_b = torch.zeros_like(last_a), torch.zeros_like(last_b)
+                            last_a, last_b = _route_messages(ma, mb, vocab, task, use_messages)
                             _, aa, _, _ = a(pa, last_b); _, ab, _, _ = b(pb, last_a)
                         rows.append((prey_t, trap_t, ma.item(), mb.item() if mb is not None else -1))
 
@@ -191,10 +188,13 @@ def run(seed=0, episodes=3000, rounds=2, vocab=8, zones=4, use_messages=True,
         raise ValueError('auxiliary coefficients must be nonnegative')
     if receiver_bootstrap_episodes < 0:
         raise ValueError('receiver_bootstrap_episodes must be nonnegative')
+    state_rng = torch.Generator().manual_seed(seed + 1000003)
     records=[]; recent=[]; start=time.perf_counter()
     for ep in range(1, episodes+1):
-        prey_t, prey_z = torch.randint(type_count,(1,)), torch.randint(zones,(1,))
-        trap_t, trap_z = torch.randint(type_count,(1,)), torch.randint(zones,(1,))
+        prey_t = torch.randint(type_count, (1,), generator=state_rng)
+        prey_z = torch.randint(zones, (1,), generator=state_rng)
+        trap_t = torch.randint(type_count, (1,), generator=state_rng)
+        trap_z = torch.randint(zones, (1,), generator=state_rng)
         last_a = torch.zeros(1,vocab); last_b = torch.zeros(1,vocab)
         logs=[]; values=[]; aux_losses=[]; sender_losses=[]
         active_task = ('one_way' if curriculum and ep <= episodes // 2
@@ -229,13 +229,9 @@ def run(seed=0, episodes=3000, rounds=2, vocab=8, zones=4, use_messages=True,
                     message_logs = [da.log_prob(ma)]
                     if active_task == 'symmetric':
                         message_logs.append(Categorical(logits=tb).log_prob(mb))
-                if active_task == 'symmetric':
-                    last_a, last_b = (oh(ma, vocab), oh(mb, vocab))
-                else:
-                    last_a = oh(ma, vocab)
-                    last_b = torch.zeros_like(last_b)
+                last_a, last_b = _route_messages(ma, mb, vocab, active_task, True)
             else:
-                last_a, last_b = torch.zeros_like(last_a), torch.zeros_like(last_b)
+                last_a, last_b = _route_messages(None, None, vocab, active_task, False)
                 message_logs = []
             # Action is chosen after exchange.  The type component is a
             # deliberate communication bottleneck: A must guess trap_t and B
