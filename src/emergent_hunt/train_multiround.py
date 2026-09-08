@@ -44,8 +44,12 @@ def run(seed=0, episodes=3000, rounds=2, vocab=8, zones=4, use_messages=True,
             marker = oh(torch.tensor([r]), 3)
             pa = torch.cat((oh(prey_t,3), oh(prey_z,zones), marker), -1)
             pb = torch.cat((oh(trap_t,3), oh(trap_z,zones), marker), -1)
-            ta, _, _ = a(pa, last_b)
-            tb, _, _ = b(pb, last_a)
+            # last_a/last_b hold what A/B currently have *received* (zero on
+            # round 0). Each agent's own forward pass must condition on its
+            # own incoming slot -- a(pa, last_a), b(pb, last_b) -- not on the
+            # partner's, or on its own just-sent message.
+            ta, _, _ = a(pa, last_a)
+            tb, _, _ = b(pb, last_b)
             if use_messages:
                 # Straight-through: hard one-hot message in the forward pass,
                 # continuous Gumbel gradient in the backward pass. This keeps
@@ -58,9 +62,21 @@ def run(seed=0, episodes=3000, rounds=2, vocab=8, zones=4, use_messages=True,
                 last_a, last_b = torch.zeros_like(last_a), torch.zeros_like(last_b)
             # Action is chosen after exchange.  The type component is a
             # deliberate communication bottleneck: A must guess trap_t and B
-            # must guess prey_t.
-            _, aa, va = a(pa, last_b)
-            _, ab, vb = b(pb, last_a)
+            # must guess prey_t. Bug fixed here (board thread f8356f4a...,
+            # nadir-codex's 100k-episode matched run): both the message-
+            # generation call above and this action call were previously
+            # wired to `a(pa, last_b)` / `b(pb, last_a)` -- i.e. last_b (=ma,
+            # A's OWN outgoing message) fed back into A, and last_a (=mb, B's
+            # OWN outgoing message) fed back into B. Neither agent's action
+            # ever consumed the message it actually received; the channel
+            # was causally inert from the very first multiround trainer
+            # commit (67f9b56), not something that broke between "helps" and
+            # "doesn't help". zone_score reaches 1.0 because zone is
+            # self-observed and needs no message; type_score/terminal_success
+            # stay at 0.0 because the type guess is the one thing that
+            # genuinely required the partner's message, and it never arrived.
+            _, aa, va = a(pa, last_a)
+            _, ab, vb = b(pb, last_b)
             daction, baction = Categorical(logits=aa), Categorical(logits=ab)
             act_a, act_b = daction.sample(), baction.sample()
             logs.append(daction.log_prob(act_a)+baction.log_prob(act_b))
