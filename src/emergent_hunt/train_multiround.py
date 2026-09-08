@@ -4,7 +4,7 @@ from pathlib import Path
 import torch
 from torch import nn
 from torch.distributions import Categorical
-from torch.nn.functional import one_hot, gumbel_softmax
+from torch.nn.functional import one_hot, gumbel_softmax, cross_entropy
 
 
 def oh(x, n): return one_hot(x, n).float()
@@ -139,7 +139,7 @@ def _protocol_diagnostics(a, b, task, rounds=2, vocab=8, zones=4, type_count=3):
 def run(seed=0, episodes=3000, rounds=2, vocab=8, zones=4, use_messages=True,
         message_temperature=0.7, differentiable_messages=False,
         communication_task='symmetric', curriculum=False, type_count=3,
-        coupled=False):
+        coupled=False, receiver_aux=0.0, sender_aux=0.0):
     if communication_task not in ('symmetric', 'one_way'):
         raise ValueError('communication_task must be symmetric or one_way')
     torch.manual_seed(seed); torch.set_num_threads(1)
@@ -166,12 +166,14 @@ def run(seed=0, episodes=3000, rounds=2, vocab=8, zones=4, use_messages=True,
         if id(parameter) not in seen:
             seen.add(id(parameter)); params.append(parameter)
     opt = torch.optim.Adam(params, lr=.003)
+    if receiver_aux < 0 or sender_aux < 0:
+        raise ValueError('auxiliary coefficients must be nonnegative')
     records=[]; recent=[]; start=time.perf_counter()
     for ep in range(1, episodes+1):
         prey_t, prey_z = torch.randint(type_count,(1,)), torch.randint(zones,(1,))
         trap_t, trap_z = torch.randint(type_count,(1,)), torch.randint(zones,(1,))
         last_a = torch.zeros(1,vocab); last_b = torch.zeros(1,vocab)
-        logs=[]; values=[]
+        logs=[]; values=[]; aux_losses=[]; sender_losses=[]
         active_task = ('one_way' if curriculum and ep <= episodes // 2
                        else communication_task)
         for r in range(rounds):
@@ -214,6 +216,18 @@ def run(seed=0, episodes=3000, rounds=2, vocab=8, zones=4, use_messages=True,
             act_a, act_b = daction.sample(), baction.sample()
             logs.append(sum(message_logs) + daction.log_prob(act_a) + baction.log_prob(act_b))
             values.append((va+vb)/2)
+            # Privileged target is used only as an auxiliary training signal;
+            # neither agent receives the partner type as an observation.
+            b_type_logits = ab.view(1, zones, type_count).logsumexp(1)
+            sender_losses.append(cross_entropy(ta, prey_t))
+            if active_task == 'symmetric':
+                sender_losses.append(cross_entropy(tb, trap_t))
+            if active_task == 'one_way':
+                aux_losses.append(cross_entropy(b_type_logits, prey_t))
+            else:
+                a_type_logits = aa.view(1, zones, type_count).logsumexp(1)
+                aux_losses.append(0.5 * (cross_entropy(a_type_logits, trap_t) +
+                                         cross_entropy(b_type_logits, prey_t)))
         a_zone, a_guess_trap = act_a // type_count, act_a % type_count
         b_zone, b_guess_prey = act_b // type_count, act_b % type_count
         zone_score = 0.5 * ((a_zone == prey_z).float() + (b_zone == trap_z).float())
@@ -232,7 +246,12 @@ def run(seed=0, episodes=3000, rounds=2, vocab=8, zones=4, use_messages=True,
         # success signal rather than being silently conflated with shaping.
         reward = 0.15 * zone_score + 0.40 * type_score + 0.45 * terminal
         ret = reward.detach()
-        loss = sum(-log * (ret-val.detach()) + .5*(val-ret).square() for log,val in zip(logs,values)) / rounds
+        policy_loss = sum(-log * (ret-val.detach()) + .5*(val-ret).square()
+                          for log,val in zip(logs,values)) / rounds
+        effective_aux = receiver_aux if use_messages else 0.0
+        effective_sender_aux = sender_aux if use_messages else 0.0
+        loss = (policy_loss + effective_aux * sum(aux_losses) / rounds +
+                effective_sender_aux * sum(sender_losses) / rounds)
         opt.zero_grad(); loss.backward(); nn.utils.clip_grad_norm_(params, 5); opt.step()
         recent.append(reward.item())
         if len(recent) > 100: recent.pop(0)
@@ -246,7 +265,7 @@ def run(seed=0, episodes=3000, rounds=2, vocab=8, zones=4, use_messages=True,
     eval_task = communication_task
     return {'seed':seed,'episodes':episodes,'rounds':rounds,'use_messages':use_messages,
             'communication_task': communication_task, 'curriculum': curriculum,
-            'coupled': coupled,
+            'coupled': coupled, 'receiver_aux': receiver_aux, 'sender_aux': sender_aux,
             'seconds':time.perf_counter()-start,'history':records,
             'fixed_grid_eval': _fixed_grid_eval(a, b, eval_task, rounds, vocab, zones, type_count),
             'protocol_diagnostics': _protocol_diagnostics(a, b, eval_task, rounds, vocab, zones, type_count)}
@@ -258,11 +277,13 @@ def main():
     p.add_argument('--task',choices=['symmetric','one_way'],default='symmetric')
     p.add_argument('--curriculum',action='store_true')
     p.add_argument('--coupled',action='store_true')
+    p.add_argument('--receiver-aux',type=float,default=0.0)
+    p.add_argument('--sender-aux',type=float,default=0.0)
     p.add_argument('--type-count',type=int,default=3); p.add_argument('--zones',type=int,default=4)
     p.add_argument('--rounds',type=int,default=2)
     args=p.parse_args(); out=Path(args.output); out.parent.mkdir(parents=True,exist_ok=True); all=[]
     for s in args.seeds:
         for m in (True,False):
-            r=run(s,args.episodes,rounds=args.rounds,zones=args.zones,type_count=args.type_count,use_messages=m,communication_task=args.task,curriculum=args.curriculum,coupled=args.coupled); all.append(r); out.write_text(json.dumps(all,indent=2)); print(json.dumps({'seed':s,'messages':m,'task':args.task,'curriculum':args.curriculum,'coupled':args.coupled,'last':r['history'][-1],'eval':r['fixed_grid_eval'],'protocol':r['protocol_diagnostics']}),flush=True)
+            r=run(s,args.episodes,rounds=args.rounds,zones=args.zones,type_count=args.type_count,use_messages=m,communication_task=args.task,curriculum=args.curriculum,coupled=args.coupled,receiver_aux=args.receiver_aux,sender_aux=args.sender_aux); all.append(r); out.write_text(json.dumps(all,indent=2)); print(json.dumps({'seed':s,'messages':m,'task':args.task,'curriculum':args.curriculum,'coupled':args.coupled,'receiver_aux':args.receiver_aux,'sender_aux':args.sender_aux,'last':r['history'][-1],'eval':r['fixed_grid_eval'],'protocol':r['protocol_diagnostics']}),flush=True)
 
 if __name__ == '__main__': main()
