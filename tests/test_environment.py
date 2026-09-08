@@ -1,6 +1,6 @@
 import unittest
-from emergent_hunt.environment import SymbolicHunt, states
-from emergent_hunt.evaluate import controls
+from emergent_hunt.environment import SymbolicHunt, states, held_out_pairs
+from emergent_hunt.evaluate import controls, pair_lookup_baseline
 
 
 class EnvironmentTests(unittest.TestCase):
@@ -11,6 +11,26 @@ class EnvironmentTests(unittest.TestCase):
         for field in ('prey', 'direction', 'trap'):
             self.assertEqual({getattr(s, field) for s in train}, set(range(3)))
             self.assertEqual({getattr(s, field) for s in test}, set(range(3)))
+
+    def test_by_pair_holds_out_whole_pairs(self):
+        train = set(states(split='train', by='pair'))
+        test = set(states(split='test', by='pair'))
+        self.assertFalse(train & test)
+        self.assertEqual(train | test, set(states(by='pair')))
+        train_pairs = {(s.prey, s.direction) for s in train}
+        test_pairs = {(s.prey, s.direction) for s in test}
+        self.assertFalse(train_pairs & test_pairs)
+        self.assertEqual(test_pairs, held_out_pairs(3))
+        # every held-out pair appears for every trap value: n states each
+        for p, d in held_out_pairs(3):
+            self.assertEqual({s.trap for s in test if (s.prey, s.direction) == (p, d)},
+                              set(range(3)))
+
+    def test_pair_lookup_baseline_shortcut_and_its_closure(self):
+        triple = pair_lookup_baseline(by='triple')
+        self.assertEqual(triple['lookup_would_solve_fraction'], 1.0)
+        pair = pair_lookup_baseline(by='pair')
+        self.assertEqual(pair['lookup_would_solve_fraction'], 0.0)
 
     def test_reference_protocol(self):
         env = SymbolicHunt(token_cost=.1)

@@ -11,13 +11,30 @@ class State:
     trap: int
 
 
-def states(n=3, split='all'):
+def held_out_pairs(n):
+    """(prey, direction) pairs withheld entirely from train under by='pair'.
+
+    Every held-out pair is absent from train for ALL trap values, so a lookup
+    keyed on (prey, direction) alone (see evaluate.pair_lookup_baseline) cannot
+    cover it -- unlike by='triple', where every pair recurs in both splits
+    (see #24928/#24933 on the board) and such a lookup reaches 100% on test.
+    """
+    return frozenset((p, d) for p, d in product(range(n), repeat=2) if (p + d) % n == 0)
+
+
+def states(n=3, split='all', by='triple'):
     if type(n) is not int or n < 2:
         raise ValueError('n must be an integer >= 2')
     if split not in ('all', 'train', 'test'):
         raise ValueError('unknown split')
+    if by not in ('triple', 'pair'):
+        raise ValueError('unknown by')
+    if by == 'triple':
+        return tuple(State(*x) for x in product(range(n), repeat=3)
+                     if split == 'all' or ((sum(x) % n == 0) == (split == 'test')))
+    held = held_out_pairs(n)
     return tuple(State(*x) for x in product(range(n), repeat=3)
-                 if split == 'all' or ((sum(x) % n == 0) == (split == 'test')))
+                 if split == 'all' or (((x[0], x[1]) in held) == (split == 'test')))
 
 
 class SymbolicHunt:
@@ -28,8 +45,8 @@ class SymbolicHunt:
     This Python object is a trusted simulator, not a security sandbox.
     """
     def __init__(self, n=3, split='train', seed=0, vocabulary=8,
-                 max_length=2, erasure=0.0, token_cost=0.0):
-        self._states = states(n, split)
+                 max_length=2, erasure=0.0, token_cost=0.0, by='triple'):
+        self._states = states(n, split, by)
         if type(vocabulary) is not int or vocabulary < 1:
             raise ValueError('vocabulary must be positive')
         if type(max_length) is not int or max_length < 0:
