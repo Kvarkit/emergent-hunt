@@ -1,3 +1,6 @@
+import json
+import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -105,6 +108,60 @@ class DiagnoseCheckpointTests(unittest.TestCase):
             report1 = diagnose(str(path))
             report2 = diagnose(str(path))
             self.assertEqual(report1['network_signature'], report2['network_signature'])
+
+    # --- nadir-codex #25752: on-disk file, fresh subprocess -----------------
+
+    def _run_diagnose_subprocess(self, checkpoint_path, output_path):
+        # A genuinely fresh `python -m` process, not an in-process call: no
+        # shared import state, no leftover module-level caching, nothing
+        # this test file's own process happens to have already loaded.
+        result = subprocess.run(
+            [sys.executable, '-m', 'emergent_hunt.diagnose_checkpoint',
+             str(checkpoint_path), '--output', str(output_path)],
+            cwd=Path(__file__).parent.parent / 'src', capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return json.loads(Path(output_path).read_text(encoding='utf-8'))
+
+    def test_file_round_trip_in_fresh_subprocess(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            checkpoint = _save(tmp, 'bag_receiver')
+            output = Path(tmp) / 'report.json'
+            report = self._run_diagnose_subprocess(checkpoint, output)
+
+            expected_sha256 = __import__('hashlib').sha256(checkpoint.read_bytes()).hexdigest()
+            self.assertEqual(report['checkpoint_sha256'], expected_sha256)
+            self.assertEqual(report['rows'][0]['architecture'], 'bag_receiver')
+            self.assertIn('network_signature', report)
+            self.assertEqual(len(report['network_signature']), 64)  # sha256 hex
+
+    def test_forged_on_disk_checkpoint_is_caught_by_output_signature(self):
+        # Same request as gate 2, but end-to-end: a real .pt FILE on disk,
+        # tagged bag_receiver, whose receiver state_dict was produced by the
+        # wrong-order wiring -- strict load_state_dict inside diagnose() does
+        # not raise (same keys/shapes), so only network_signature can tell
+        # the two files apart. This is the file-level counterpart nadir-codex
+        # #25752 asked for in addition to the in-memory gate-2 test above.
+        with tempfile.TemporaryDirectory() as tmp:
+            real_path = _save(tmp, 'bag_receiver')
+
+            wrong = self._WrongOrderBagReceiver()
+            wrong.load_state_dict(BagReceiver().state_dict())  # succeeds: same keys/shapes
+            forged_path = Path(tmp) / 'forged_bag_receiver.pt'
+            torch.save({'sender': mlp(6, 16).state_dict(), 'receiver': wrong.state_dict(),
+                        'critic': mlp(9, 1).state_dict(), 'architecture': 'bag_receiver',
+                        'head': 'factorized', 'seed': 0, 'mode': 'communication', 'by': 'pair',
+                        'reward_kind': 'exact', 'steps': 0}, forged_path)
+
+            real_report = self._run_diagnose_subprocess(real_path, Path(tmp) / 'real.json')
+            forged_report = self._run_diagnose_subprocess(forged_path, Path(tmp) / 'forged.json')
+
+            self.assertNotEqual(real_report['checkpoint_sha256'], forged_report['checkpoint_sha256'])
+            self.assertNotEqual(
+                real_report['network_signature'], forged_report['network_signature'],
+                'forged on-disk checkpoint (wrong-order BagReceiver wiring, same '
+                'state_dict shape) produced the same network_signature as the real '
+                'one when loaded in a fresh subprocess -- strict state_dict load '
+                'alone cannot catch this, and neither did the identity check')
 
 
 if __name__ == '__main__':

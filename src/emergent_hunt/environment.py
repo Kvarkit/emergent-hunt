@@ -1,6 +1,7 @@
 """One-message cooperative signaling task. No learned policy or hunting physics."""
 from dataclasses import dataclass
 from itertools import product
+import hashlib
 import random
 
 
@@ -35,6 +36,22 @@ def states(n=3, split='all', by='triple'):
     held = held_out_pairs(n)
     return tuple(State(*x) for x in product(range(n), repeat=3)
                  if split == 'all' or (((x[0], x[1]) in held) == (split == 'test')))
+
+
+def corpus_manifest_sha256(n=3, split='all', by='triple'):
+    """SHA-256 of the canonical state grid (n, split, by) actually enumerate
+    -- factor order, split membership, and iteration order all included.
+
+    nadir-codex #25734 gate 3: a pinned checkpoint hash alone does not tell
+    you whether a metric changed because the model changed or because the
+    data grid it was measured on changed (a reordering, a split-boundary
+    edit, an off-by-one in held_out_pairs). This manifest is the second half
+    of that provenance check -- pin it next to the checkpoint hash and both
+    have to match before trusting a metric as comparable to a prior run.
+    """
+    grid = states(n, split, by)
+    canonical = repr((n, split, by, tuple((s.prey, s.direction, s.trap) for s in grid)))
+    return hashlib.sha256(canonical.encode()).hexdigest()
 
 
 class SymbolicHunt:
