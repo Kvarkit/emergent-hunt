@@ -11,14 +11,15 @@ def oh(x, n): return one_hot(x, n).float()
 
 
 class Agent(nn.Module):
-    def __init__(self, private_dim, vocab, action_dim, marker_dim=3, type_count=3, body=None):
+    def __init__(self, private_dim, vocab, action_dim, marker_dim=3, type_count=3,
+                 hidden_dim=32, body=None):
         super().__init__()
         self.body = (body if body is not None else
-                     nn.Sequential(nn.Linear(private_dim + marker_dim + vocab, 32), nn.Tanh()))
-        self.token = nn.Linear(32, vocab)
+                     nn.Sequential(nn.Linear(private_dim + marker_dim + vocab, hidden_dim), nn.Tanh()))
+        self.token = nn.Linear(hidden_dim, vocab)
         self.message_decoder = nn.Linear(vocab, type_count)
-        self.action = nn.Linear(32 + type_count, action_dim)
-        self.value = nn.Linear(32, 1)
+        self.action = nn.Linear(hidden_dim + type_count, action_dim)
+        self.value = nn.Linear(hidden_dim, 1)
 
     def forward(self, private, incoming):
         h = self.body(torch.cat((private, incoming), -1))
@@ -148,7 +149,7 @@ def run(seed=0, episodes=3000, rounds=2, vocab=8, zones=4, use_messages=True,
         message_temperature=0.7, differentiable_messages=False,
         communication_task='symmetric', curriculum=False, type_count=3,
         coupled=False, receiver_aux=0.0, sender_aux=0.0,
-        receiver_bootstrap_episodes=0):
+        receiver_bootstrap_episodes=0, hidden_dim=32):
     if communication_task not in ('symmetric', 'one_way'):
         raise ValueError('communication_task must be symmetric or one_way')
     torch.manual_seed(seed); torch.set_num_threads(1)
@@ -161,16 +162,16 @@ def run(seed=0, episodes=3000, rounds=2, vocab=8, zones=4, use_messages=True,
         raise ValueError('type_count, zones and rounds must be >= 2, 2, and 1')
     if coupled:
         shared_body = nn.Sequential(
-            nn.Linear(type_count + zones + rounds + vocab, 32), nn.Tanh())
+            nn.Linear(type_count + zones + rounds + vocab, hidden_dim), nn.Tanh())
         a = Agent(type_count + zones, vocab, zones * type_count, rounds,
-                  type_count=type_count, body=shared_body)
+                  type_count=type_count, hidden_dim=hidden_dim, body=shared_body)
         b = Agent(type_count + zones, vocab, zones * type_count, rounds,
-                  type_count=type_count, body=shared_body)
+                  type_count=type_count, hidden_dim=hidden_dim, body=shared_body)
     else:
         a, b = (Agent(type_count + zones, vocab, zones * type_count, rounds,
-                      type_count=type_count),
+                      type_count=type_count, hidden_dim=hidden_dim),
                 Agent(type_count + zones, vocab, zones * type_count, rounds,
-                      type_count=type_count))
+                      type_count=type_count, hidden_dim=hidden_dim))
     params = []
     seen = set()
     for parameter in list(a.parameters()) + list(b.parameters()):
@@ -287,6 +288,7 @@ def run(seed=0, episodes=3000, rounds=2, vocab=8, zones=4, use_messages=True,
             'communication_task': communication_task, 'curriculum': curriculum,
             'coupled': coupled, 'receiver_aux': receiver_aux, 'sender_aux': sender_aux,
             'receiver_bootstrap_episodes': receiver_bootstrap_episodes,
+            'hidden_dim': hidden_dim,
             'seconds':time.perf_counter()-start,'history':records,
             'fixed_grid_eval': _fixed_grid_eval(a, b, eval_task, rounds, vocab, zones, type_count),
             'protocol_diagnostics': _protocol_diagnostics(a, b, eval_task, rounds, vocab, zones, type_count)}
@@ -294,18 +296,20 @@ def run(seed=0, episodes=3000, rounds=2, vocab=8, zones=4, use_messages=True,
 
 def run_staged_one_way(seed=0, sender_episodes=1000, receiver_episodes=2000,
                        joint_episodes=3000, vocab=8, zones=4, type_count=3,
-                       coupled=False):
+                       coupled=False, hidden_dim=32):
     """Canonical sender -> frozen receiver -> joint one-way curriculum."""
     torch.manual_seed(seed); torch.set_num_threads(1)
     if coupled:
-        body = nn.Sequential(nn.Linear(type_count + zones + 2 + vocab, 32), nn.Tanh())
+        body = nn.Sequential(nn.Linear(type_count + zones + 2 + vocab, hidden_dim), nn.Tanh())
         a = Agent(type_count + zones, vocab, zones * type_count, 2,
-                  type_count=type_count, body=body)
+                  type_count=type_count, hidden_dim=hidden_dim, body=body)
         b = Agent(type_count + zones, vocab, zones * type_count, 2,
-                  type_count=type_count, body=body)
+                  type_count=type_count, hidden_dim=hidden_dim, body=body)
     else:
-        a = Agent(type_count + zones, vocab, zones * type_count, 2, type_count=type_count)
-        b = Agent(type_count + zones, vocab, zones * type_count, 2, type_count=type_count)
+        a = Agent(type_count + zones, vocab, zones * type_count, 2,
+                  type_count=type_count, hidden_dim=hidden_dim)
+        b = Agent(type_count + zones, vocab, zones * type_count, 2,
+                  type_count=type_count, hidden_dim=hidden_dim)
 
     def make_params(*modules):
         out = []; seen = set()
@@ -369,9 +373,10 @@ def main():
     p.add_argument('--receiver-bootstrap',type=int,default=0)
     p.add_argument('--type-count',type=int,default=3); p.add_argument('--zones',type=int,default=4)
     p.add_argument('--rounds',type=int,default=2)
+    p.add_argument('--hidden-dim',type=int,default=32)
     args=p.parse_args(); out=Path(args.output); out.parent.mkdir(parents=True,exist_ok=True); all=[]
     for s in args.seeds:
         for m in (True,False):
-            r=run(s,args.episodes,rounds=args.rounds,zones=args.zones,type_count=args.type_count,use_messages=m,communication_task=args.task,curriculum=args.curriculum,coupled=args.coupled,receiver_aux=args.receiver_aux,sender_aux=args.sender_aux,receiver_bootstrap_episodes=args.receiver_bootstrap); all.append(r); out.write_text(json.dumps(all,indent=2)); print(json.dumps({'seed':s,'messages':m,'task':args.task,'curriculum':args.curriculum,'coupled':args.coupled,'receiver_aux':args.receiver_aux,'sender_aux':args.sender_aux,'bootstrap':args.receiver_bootstrap,'last':r['history'][-1],'eval':r['fixed_grid_eval'],'protocol':r['protocol_diagnostics']}),flush=True)
+            r=run(s,args.episodes,rounds=args.rounds,zones=args.zones,type_count=args.type_count,use_messages=m,communication_task=args.task,curriculum=args.curriculum,coupled=args.coupled,receiver_aux=args.receiver_aux,sender_aux=args.sender_aux,receiver_bootstrap_episodes=args.receiver_bootstrap,hidden_dim=args.hidden_dim); all.append(r); out.write_text(json.dumps(all,indent=2)); print(json.dumps({'seed':s,'messages':m,'task':args.task,'curriculum':args.curriculum,'coupled':args.coupled,'hidden_dim':args.hidden_dim,'last':r['history'][-1],'eval':r['fixed_grid_eval'],'protocol':r['protocol_diagnostics']}),flush=True)
 
 if __name__ == '__main__': main()
