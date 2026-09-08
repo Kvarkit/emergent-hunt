@@ -27,14 +27,19 @@ class Agent(nn.Module):
                      nn.Sequential(nn.Linear(private_dim + marker_dim + vocab, hidden_dim), nn.Tanh()))
         self.token = nn.Linear(hidden_dim, vocab)
         self.message_decoder = nn.Linear(vocab, type_count)
-        self.action = nn.Linear(hidden_dim + type_count, action_dim)
+        self.zone_action = nn.Linear(hidden_dim + type_count, action_dim // type_count)
+        self.type_action = nn.Linear(hidden_dim + type_count, type_count)
         self.value = nn.Linear(hidden_dim, 1)
 
     def forward(self, private, incoming):
         h = self.body(torch.cat((private, incoming), -1))
         message_type_logits = self.message_decoder(incoming)
         action_h = torch.cat((h, message_type_logits.softmax(-1)), -1)
-        return self.token(h), self.action(action_h), self.value(h).squeeze(-1), message_type_logits
+        zone_logits = self.zone_action(action_h)
+        type_logits = self.type_action(action_h)
+        joint_logits = (zone_logits.unsqueeze(-1) + type_logits.unsqueeze(-2)).reshape(
+            zone_logits.shape[0], -1)
+        return self.token(h), joint_logits, self.value(h).squeeze(-1), message_type_logits
 
 
 def _fixed_grid_eval(a, b, task, rounds=2, vocab=8, zones=4, type_count=3,
