@@ -11,9 +11,10 @@ def oh(x, n): return one_hot(x, n).float()
 
 
 class Agent(nn.Module):
-    def __init__(self, private_dim, vocab, action_dim, marker_dim=3):
+    def __init__(self, private_dim, vocab, action_dim, marker_dim=3, body=None):
         super().__init__()
-        self.body = nn.Sequential(nn.Linear(private_dim + marker_dim + vocab, 32), nn.Tanh())
+        self.body = (body if body is not None else
+                     nn.Sequential(nn.Linear(private_dim + marker_dim + vocab, 32), nn.Tanh()))
         self.token = nn.Linear(32, vocab)
         self.action = nn.Linear(32, action_dim)
         self.value = nn.Linear(32, 1)
@@ -74,7 +75,8 @@ def _fixed_grid_eval(a, b, task, rounds=2, vocab=8, zones=4, type_count=3):
 
 def run(seed=0, episodes=3000, rounds=2, vocab=8, zones=4, use_messages=True,
         message_temperature=0.7, differentiable_messages=False,
-        communication_task='symmetric', curriculum=False, type_count=3):
+        communication_task='symmetric', curriculum=False, type_count=3,
+        coupled=False):
     if communication_task not in ('symmetric', 'one_way'):
         raise ValueError('communication_task must be symmetric or one_way')
     torch.manual_seed(seed); torch.set_num_threads(1)
@@ -85,9 +87,22 @@ def run(seed=0, episodes=3000, rounds=2, vocab=8, zones=4, use_messages=True,
     # controllable by any action.
     if type_count < 2 or zones < 2 or rounds < 1:
         raise ValueError('type_count, zones and rounds must be >= 2, 2, and 1')
-    a, b = (Agent(type_count + zones, vocab, zones * type_count, rounds),
-            Agent(type_count + zones, vocab, zones * type_count, rounds))
-    opt = torch.optim.Adam(list(a.parameters()) + list(b.parameters()), lr=.003)
+    if coupled:
+        shared_body = nn.Sequential(
+            nn.Linear(type_count + zones + rounds + vocab, 32), nn.Tanh())
+        a = Agent(type_count + zones, vocab, zones * type_count, rounds,
+                  body=shared_body)
+        b = Agent(type_count + zones, vocab, zones * type_count, rounds,
+                  body=shared_body)
+    else:
+        a, b = (Agent(type_count + zones, vocab, zones * type_count, rounds),
+                Agent(type_count + zones, vocab, zones * type_count, rounds))
+    params = []
+    seen = set()
+    for parameter in list(a.parameters()) + list(b.parameters()):
+        if id(parameter) not in seen:
+            seen.add(id(parameter)); params.append(parameter)
+    opt = torch.optim.Adam(params, lr=.003)
     records=[]; recent=[]; start=time.perf_counter()
     for ep in range(1, episodes+1):
         prey_t, prey_z = torch.randint(type_count,(1,)), torch.randint(zones,(1,))
@@ -155,7 +170,7 @@ def run(seed=0, episodes=3000, rounds=2, vocab=8, zones=4, use_messages=True,
         reward = 0.15 * zone_score + 0.40 * type_score + 0.45 * terminal
         ret = reward.detach()
         loss = sum(-log * (ret-val.detach()) + .5*(val-ret).square() for log,val in zip(logs,values)) / rounds
-        opt.zero_grad(); loss.backward(); nn.utils.clip_grad_norm_(list(a.parameters())+list(b.parameters()),5); opt.step()
+        opt.zero_grad(); loss.backward(); nn.utils.clip_grad_norm_(params, 5); opt.step()
         recent.append(reward.item())
         if len(recent) > 100: recent.pop(0)
         if ep == 1 or ep % 300 == 0 or ep == episodes:
@@ -168,6 +183,7 @@ def run(seed=0, episodes=3000, rounds=2, vocab=8, zones=4, use_messages=True,
     eval_task = communication_task
     return {'seed':seed,'episodes':episodes,'rounds':rounds,'use_messages':use_messages,
             'communication_task': communication_task, 'curriculum': curriculum,
+            'coupled': coupled,
             'seconds':time.perf_counter()-start,'history':records,
             'fixed_grid_eval': _fixed_grid_eval(a, b, eval_task, rounds, vocab, zones, type_count)}
 
@@ -177,11 +193,12 @@ def main():
     p.add_argument('--seeds',type=int,nargs='+',default=[0,1,2]); p.add_argument('--output',default='results/multiround-smoke.json')
     p.add_argument('--task',choices=['symmetric','one_way'],default='symmetric')
     p.add_argument('--curriculum',action='store_true')
+    p.add_argument('--coupled',action='store_true')
     p.add_argument('--type-count',type=int,default=3); p.add_argument('--zones',type=int,default=4)
     p.add_argument('--rounds',type=int,default=2)
     args=p.parse_args(); out=Path(args.output); out.parent.mkdir(parents=True,exist_ok=True); all=[]
     for s in args.seeds:
         for m in (True,False):
-            r=run(s,args.episodes,rounds=args.rounds,zones=args.zones,type_count=args.type_count,use_messages=m,communication_task=args.task,curriculum=args.curriculum); all.append(r); out.write_text(json.dumps(all,indent=2)); print(json.dumps({'seed':s,'messages':m,'task':args.task,'curriculum':args.curriculum,'last':r['history'][-1],'eval':r['fixed_grid_eval']}),flush=True)
+            r=run(s,args.episodes,rounds=args.rounds,zones=args.zones,type_count=args.type_count,use_messages=m,communication_task=args.task,curriculum=args.curriculum,coupled=args.coupled); all.append(r); out.write_text(json.dumps(all,indent=2)); print(json.dumps({'seed':s,'messages':m,'task':args.task,'curriculum':args.curriculum,'coupled':args.coupled,'last':r['history'][-1],'eval':r['fixed_grid_eval']}),flush=True)
 
 if __name__ == '__main__': main()
