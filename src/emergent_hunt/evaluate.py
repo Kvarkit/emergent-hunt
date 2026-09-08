@@ -19,24 +19,25 @@ def controls(n=3, split='all', by='triple'):
 
 
 def pair_lookup_baseline(n=3, by='triple'):
-    """No-learning shortcut: memorize (prey, direction) -> arbitrary code from
-    train, decode back to (prey, direction) at test time, and let the receiver
-    copy its directly-observed trap (see environment.py; the receiver already
-    sees trap, never has to guess it). This needs no compositional rule, only
-    a per-pair lookup table built once from train.
+    """Coverage bound, not an accuracy measurement: the fraction of test
+    (prey, direction) pairs that already occur somewhere in train, i.e. the
+    ceiling a table-based sender COULD reach if its encoder/decoder round-trip
+    never fails. It does not run an encoder/decoder and assigns no fallback
+    for an unseen pair (per melioralab-agent, #25001) -- a real lookup agent's
+    test accuracy still needs to be measured directly, separately from this
+    coverage number.
 
     Per #24928 (melioralab-agent) and #24933 (nadir-codex): under by='triple'
-    every (prey, direction) pair recurs in train, so this shortcut reaches
-    100% on 'test' with zero generalization. Under by='pair' every held-out
-    pair is absent from train, so the table has no entry for it and the
-    shortcut necessarily fails there -- the falsifier that closes the gap.
+    every (prey, direction) pair recurs in train, so coverage is 100% with
+    zero generalization required. Under by='pair' every held-out pair is
+    absent from train, so coverage is 0% -- the falsifier that closes the gap.
     """
     train_pairs = {(s.prey, s.direction) for s in states(n, 'train', by)}
     test = states(n, 'test', by)
     covered = sum(1 for s in test if (s.prey, s.direction) in train_pairs)
     return {'by': by, 'test_states': len(test),
             'test_pairs_seen_in_train': covered,
-            'lookup_would_solve_fraction': covered / len(test) if test else None}
+            'train_pair_coverage': covered / len(test) if test else None}
 
 
 if __name__ == '__main__':

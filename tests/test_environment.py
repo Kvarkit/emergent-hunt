@@ -28,9 +28,9 @@ class EnvironmentTests(unittest.TestCase):
 
     def test_pair_lookup_baseline_shortcut_and_its_closure(self):
         triple = pair_lookup_baseline(by='triple')
-        self.assertEqual(triple['lookup_would_solve_fraction'], 1.0)
+        self.assertEqual(triple['train_pair_coverage'], 1.0)
         pair = pair_lookup_baseline(by='pair')
-        self.assertEqual(pair['lookup_would_solve_fraction'], 0.0)
+        self.assertEqual(pair['train_pair_coverage'], 0.0)
 
     def test_reference_protocol(self):
         env = SymbolicHunt(token_cost=.1)
