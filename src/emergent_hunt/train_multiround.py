@@ -41,8 +41,17 @@ def _fixed_grid_eval(a, b, task, rounds=2, vocab=8, zones=4, type_count=3):
                                             oh(torch.tensor([prey_z]), zones), marker), -1)
                             pb = torch.cat((oh(torch.tensor([trap_t]), type_count),
                                             oh(torch.tensor([trap_z]), zones), marker), -1)
-                            ta, _, _ = a(pa, last_b)
-                            tb, _, _ = b(pb, last_a)
+                            # last_a/last_b hold what A/B currently have
+                            # *received* (zero on round 0). Each agent's own
+                            # forward pass must condition on its own incoming
+                            # slot, not the partner's or its own just-sent
+                            # message (board thread f8356f4a..., #25829/#25812:
+                            # this exact swap made the channel causally inert
+                            # in run() below since the first multiround
+                            # commit; _fixed_grid_eval reproduced the same
+                            # bug independently).
+                            ta, _, _ = a(pa, last_a)
+                            tb, _, _ = b(pb, last_b)
                             ma = ta.argmax(-1)
                             mb = tb.argmax(-1) if task == 'symmetric' else None
                             if task == 'symmetric':
@@ -50,8 +59,8 @@ def _fixed_grid_eval(a, b, task, rounds=2, vocab=8, zones=4, type_count=3):
                             else:
                                 last_a = torch.zeros_like(last_a)
                                 last_b = oh(ma, vocab)
-                            _, aa, _ = a(pa, last_b)
-                            _, ab, _ = b(pb, last_a)
+                            _, aa, _ = a(pa, last_a)
+                            _, ab, _ = b(pb, last_b)
                             act_a, act_b = aa.argmax(-1), ab.argmax(-1)
                         a_zone, a_guess = act_a // type_count, act_a % type_count
                         b_zone, b_guess = act_b // type_count, act_b % type_count
@@ -115,8 +124,10 @@ def run(seed=0, episodes=3000, rounds=2, vocab=8, zones=4, use_messages=True,
             marker = oh(torch.tensor([r]), rounds)
             pa = torch.cat((oh(prey_t,type_count), oh(prey_z,zones), marker), -1)
             pb = torch.cat((oh(trap_t,type_count), oh(trap_z,zones), marker), -1)
-            ta, _, _ = a(pa, last_b)
-            tb, _, _ = b(pb, last_a)
+            # See _fixed_grid_eval above: each agent conditions on its own
+            # incoming slot (last_a for a, last_b for b), never the other's.
+            ta, _, _ = a(pa, last_a)
+            tb, _, _ = b(pb, last_b)
             if use_messages:
                 if differentiable_messages:
                     # Optional straight-through control. The default retains
@@ -145,8 +156,8 @@ def run(seed=0, episodes=3000, rounds=2, vocab=8, zones=4, use_messages=True,
             # Action is chosen after exchange.  The type component is a
             # deliberate communication bottleneck: A must guess trap_t and B
             # must guess prey_t.
-            _, aa, va = a(pa, last_b)
-            _, ab, vb = b(pb, last_a)
+            _, aa, va = a(pa, last_a)
+            _, ab, vb = b(pb, last_b)
             daction, baction = Categorical(logits=aa), Categorical(logits=ab)
             act_a, act_b = daction.sample(), baction.sample()
             logs.append(sum(message_logs) + daction.log_prob(act_a) + baction.log_prob(act_b))
