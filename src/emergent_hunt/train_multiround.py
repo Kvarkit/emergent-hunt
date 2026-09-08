@@ -204,7 +204,8 @@ def run(seed=0, episodes=3000, rounds=2, vocab=8, zones=4, use_messages=True,
         message_temperature=0.7, differentiable_messages=False,
         communication_task='symmetric', curriculum=False, type_count=3,
         coupled=False, receiver_aux=0.0, sender_aux=0.0,
-        receiver_bootstrap_episodes=0, hidden_dim=32, holdout_mod=0):
+        receiver_bootstrap_episodes=0, hidden_dim=32, holdout_mod=0,
+        auxiliary_decay=False):
     if communication_task not in ('symmetric', 'one_way'):
         raise ValueError('communication_task must be symmetric or one_way')
     torch.manual_seed(seed); torch.set_num_threads(1)
@@ -327,8 +328,9 @@ def run(seed=0, episodes=3000, rounds=2, vocab=8, zones=4, use_messages=True,
         ret = reward.detach()
         policy_loss = sum(-log * (ret-val.detach()) + .5*(val-ret).square()
                           for log,val in zip(logs,values)) / rounds
-        effective_aux = receiver_aux if use_messages else 0.0
-        effective_sender_aux = sender_aux if use_messages else 0.0
+        decay = max(0.0, 1.0 - ep / episodes) if auxiliary_decay else 1.0
+        effective_aux = receiver_aux * decay if use_messages else 0.0
+        effective_sender_aux = sender_aux * decay if use_messages else 0.0
         loss = (policy_loss + effective_aux * sum(aux_losses) / rounds +
                 effective_sender_aux * sum(sender_losses) / rounds)
         opt.zero_grad(); loss.backward(); nn.utils.clip_grad_norm_(params, 5); opt.step()
@@ -348,6 +350,7 @@ def run(seed=0, episodes=3000, rounds=2, vocab=8, zones=4, use_messages=True,
             'receiver_bootstrap_episodes': receiver_bootstrap_episodes,
             'hidden_dim': hidden_dim,
             'holdout_mod': holdout_mod,
+            'auxiliary_decay': auxiliary_decay,
             'seconds':time.perf_counter()-start,'history':records,
             'fixed_grid_eval': _fixed_grid_eval(a, b, eval_task, rounds, vocab, zones, type_count, use_messages),
             'heldout_grid_eval': _heldout_grid_eval(a, b, eval_task, rounds, vocab, zones, type_count, use_messages, holdout_mod),
@@ -435,9 +438,10 @@ def main():
     p.add_argument('--rounds',type=int,default=2)
     p.add_argument('--hidden-dim',type=int,default=32)
     p.add_argument('--holdout-mod',type=int,default=0)
+    p.add_argument('--auxiliary-decay',action='store_true')
     args=p.parse_args(); out=Path(args.output); out.parent.mkdir(parents=True,exist_ok=True); all=[]
     for s in args.seeds:
         for m in (True,False):
-            r=run(s,args.episodes,rounds=args.rounds,zones=args.zones,type_count=args.type_count,use_messages=m,communication_task=args.task,curriculum=args.curriculum,coupled=args.coupled,receiver_aux=args.receiver_aux,sender_aux=args.sender_aux,receiver_bootstrap_episodes=args.receiver_bootstrap,hidden_dim=args.hidden_dim,holdout_mod=args.holdout_mod); all.append(r); out.write_text(json.dumps(all,indent=2)); print(json.dumps({'seed':s,'messages':m,'task':args.task,'curriculum':args.curriculum,'coupled':args.coupled,'hidden_dim':args.hidden_dim,'holdout_mod':args.holdout_mod,'last':r['history'][-1],'eval':r['fixed_grid_eval'],'heldout':r['heldout_grid_eval'],'protocol':r['protocol_diagnostics']}),flush=True)
+            r=run(s,args.episodes,rounds=args.rounds,zones=args.zones,type_count=args.type_count,use_messages=m,communication_task=args.task,curriculum=args.curriculum,coupled=args.coupled,receiver_aux=args.receiver_aux,sender_aux=args.sender_aux,receiver_bootstrap_episodes=args.receiver_bootstrap,hidden_dim=args.hidden_dim,holdout_mod=args.holdout_mod,auxiliary_decay=args.auxiliary_decay); all.append(r); out.write_text(json.dumps(all,indent=2)); print(json.dumps({'seed':s,'messages':m,'task':args.task,'curriculum':args.curriculum,'coupled':args.coupled,'hidden_dim':args.hidden_dim,'holdout_mod':args.holdout_mod,'last':r['history'][-1],'eval':r['fixed_grid_eval'],'heldout':r['heldout_grid_eval'],'protocol':r['protocol_diagnostics']}),flush=True)
 
 if __name__ == '__main__': main()

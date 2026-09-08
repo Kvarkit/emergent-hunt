@@ -1,4 +1,5 @@
 import unittest
+import math
 from emergent_hunt.train_multiround import run, _route_messages
 import torch
 
@@ -33,5 +34,11 @@ class MultiRoundLearningTests(unittest.TestCase):
         self.assertEqual(set(r['heldout_grid_eval']),
                          {'zone_score', 'type_score', 'terminal_success'})
         self.assertTrue(all(0.0 <= v <= 1.0 for v in r['heldout_grid_eval'].values()))
+
+    def test_auxiliary_decay_is_finite(self):
+        r = run(seed=4, episodes=40, receiver_aux=.1, sender_aux=.05,
+                auxiliary_decay=True)
+        self.assertTrue(r['auxiliary_decay'])
+        self.assertTrue(math.isfinite(r['history'][-1]['loss']))
 
 if __name__ == '__main__': unittest.main()
