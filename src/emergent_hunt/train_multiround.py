@@ -192,12 +192,17 @@ def _protocol_diagnostics(a, b, task, rounds=2, vocab=8, zones=4, type_count=3,
                             guesses = {int(b(pb, oh(torch.tensor([k]), vocab))[1].argmax(-1).item() % type_count) for k in range(vocab)}
                         oracle_total += 1
                         sensitivity += len(guesses) / type_count
+    examples = [
+        {'prey_type': r[0], 'trap_type': r[1], 'token_a': r[2], 'token_b': r[3]}
+        for r in rows[:min(12, len(rows))]
+    ]
     return {'production_purity_sender_a': purity(0, 2),
             'production_injective_sender_a': len(set(prey_to_a)) / type_count,
             'production_purity_sender_b': (purity(1, 3) if task == 'symmetric' else None),
             'production_injective_sender_b': (len(set(trap_to_b)) / type_count if task == 'symmetric' else None),
             'oracle_receiver_type_accuracy': oracle_hits / oracle_total,
-            'receiver_token_sensitivity': sensitivity / oracle_total}
+            'receiver_token_sensitivity': sensitivity / oracle_total,
+            'message_examples': examples}
 
 
 def run(seed=0, episodes=3000, rounds=2, vocab=8, zones=4, use_messages=True,

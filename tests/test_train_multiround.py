@@ -46,4 +46,10 @@ class MultiRoundLearningTests(unittest.TestCase):
         self.assertEqual(r['action_aux'], .2)
         self.assertTrue(math.isfinite(r['history'][-1]['loss']))
 
+    def test_message_examples_are_exposed(self):
+        r = run(seed=6, episodes=30)
+        examples = r['protocol_diagnostics']['message_examples']
+        self.assertGreater(len(examples), 0)
+        self.assertIn('token_a', examples[0])
+
 if __name__ == '__main__': unittest.main()
