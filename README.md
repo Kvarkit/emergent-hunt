@@ -27,6 +27,9 @@ token meanings are learned. Frozen-checkpoint EH-INT export is available.
 The next environment contract is now implemented in `multiround.py`: multiple
 prey/trap types, private zones, alternating A→B messages, two actions and two
 rounds. It is invariant-tested and intentionally has no trainer yet.
+The proposed transition to evolving multi-step state, partial reward and
+preference-sensitive target choice is specified in
+[`experiments/multistep-protocol.md`](experiments/multistep-protocol.md).
 Relaxing the sender wiring also retains 100% transfer across three seeds:
 [receiver-only isolation](experiments/receiver-slots.md). Receiver position
 semantics remain imposed; word-order emergence has not been demonstrated.
