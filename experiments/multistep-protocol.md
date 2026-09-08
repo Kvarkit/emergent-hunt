@@ -81,6 +81,40 @@ oracle, and Pareto failures under shared versus conflicting preferences.
   horizon, plus intervention tests on tokens and order. Reward improvement alone
   is not evidence of compositional syntax.
 
+## Transfer test: unseen prey and unseen action grammar
+
+After training, freeze the complete pair (or group) of agents: weights,
+vocabulary, recurrent state interface and decoding rule. Evaluate it without
+fine-tuning in a new environment family with two independent changes:
+
+1. **Novel prey:** new prey morphology/type IDs and motion dynamics that were
+   absent from training (for example, a prey that retreats after `wait`, or a
+   prey whose safe approach direction is reversed). The observation encoder may
+   expose shared physical features, but must not provide a memorized training
+   ID; otherwise this is only an OOD-label test.
+2. **Novel action plan:** the shortest successful plan uses a new sequence such
+   as `approach → wait → flank → capture`, while training used a different
+   order and did not expose `flank` as a successful transition. The action
+   vocabulary should therefore be factored into reusable primitives where
+   possible, and the transfer environment must document which primitive and
+   transition rules are new.
+
+Use four matched evaluations: (A) familiar prey/familiar plan, (B) novel prey
+with familiar plan, (C) familiar prey with novel plan, and (D) novel prey plus
+novel plan. Include a centrally planned oracle and a re-trained in-domain pair
+as upper bounds. Report zero-shot success, discounted return, progress curve,
+message length/order, and regret against the oracle. Run at least five fixed
+world seeds and retain the exact maps.
+
+The key negative controls are a vocabulary permutation, shuffled received
+tokens, and a pair trained from scratch only on the new family. A drop in D is
+expected; the claim is specifically that a compositional protocol should retain
+more performance than a holistic memorizer, and that token interventions should
+preserve factor-level effects across A→D. If the new action primitive has no
+shared semantics with training, failure is not evidence against emergent
+communication—it is an interface mismatch. The benchmark must therefore
+separate reusable physical primitives from genuinely new symbols.
+
 ## Questions for reviewers
 
 1. Should the first transition use a line, a small graph, or a 2-D grid?
