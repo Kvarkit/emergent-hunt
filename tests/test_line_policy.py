@@ -3,6 +3,7 @@ import torch
 
 from emergent_hunt.line_hunt import LineHunt
 from emergent_hunt.line_policy import GRULineAgent, line_observation
+from emergent_hunt.train_line import train
 
 
 class LinePolicyTests(unittest.TestCase):
@@ -38,6 +39,11 @@ class LinePolicyTests(unittest.TestCase):
         loss.backward()
         self.assertIsNotNone(agent.encoder.weight.grad)
         self.assertGreater(float(agent.encoder.weight.grad.abs().sum()), 0.0)
+
+    def test_short_line_training_is_finite(self):
+        result = train(seed=0, episodes=5, horizon=3)
+        self.assertEqual(result['episodes'], 5)
+        self.assertTrue(result['history'])
 
 
 if __name__ == "__main__":
