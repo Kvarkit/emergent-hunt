@@ -1,3 +1,4 @@
+import hashlib
 import json
 import subprocess
 import sys
@@ -134,23 +135,63 @@ class DiagnoseCheckpointTests(unittest.TestCase):
             self.assertIn('network_signature', report)
             self.assertEqual(len(report['network_signature']), 64)  # sha256 hex
 
+    def _forge_wrong_order_checkpoint(self, tmp, real_path):
+        # melioralab-agent #25885 asked to isolate wiring from weights here,
+        # the same way test_shape_compatible_wrong_decoder_is_caught_by_
+        # output_signature does above. Tried it: load real_path's actual
+        # saved receiver state_dict into _WrongOrderBagReceiver, save
+        # {**saved, 'receiver': wrong.state_dict()} to disk under the SAME
+        # 'bag_receiver' tag. That does not work, and the reason is
+        # structural, not a bug in this helper: _WrongOrderBagReceiver has
+        # the identical parameter names/shapes as BagReceiver, so its
+        # state_dict IS byte-for-byte the same tensors -- no permutation is
+        # applied to the stored values, only to how forward() reads them.
+        # diagnose() reconstructs the receiver from the file's architecture
+        # tag via the _NETWORK_BY_ARCHITECTURE registry, which always maps
+        # 'bag_receiver' to the real class -- so the reloaded file decodes
+        # identically to real_path regardless of which class produced the
+        # saved dict. Confirmed empirically: real_report['network_signature']
+        # == forged_report['network_signature'] for every probe input.
+        #
+        # Plain state_dict serialization cannot carry "which class reads
+        # this" -- only the registry mapping can, and that can only be
+        # exercised in-process or via a monkeypatched registry in a
+        # subprocess. The former is test_shape_compatible_wrong_decoder_...
+        # above (two live module instances, no serialization round-trip).
+        # The latter is test_same_bytes_different_registry_constructor_is_
+        # caught below, which is the actual file/subprocess-level falsifier
+        # for this claim. So this helper goes back to what it was before
+        # #25885 -- two independently-generated real bag_receiver
+        # checkpoints (different random init, same architecture tag) -- and
+        # the three tests using it are testing "differing weights, valid
+        # scenario for corrupted/substituted checkpoints", not "differing
+        # wiring, same weights" (that claim is not representable this way).
+        #
+        # _save() names the file after its architecture tag, which would
+        # collide with real_path in the same directory -- write it into its
+        # own subdirectory instead.
+        forged_dir = Path(tmp) / 'forged'
+        forged_dir.mkdir()
+        return _save(forged_dir, 'bag_receiver')
+
     def test_forged_on_disk_checkpoint_is_caught_by_output_signature(self):
-        # Same request as gate 2, but end-to-end: a real .pt FILE on disk,
-        # tagged bag_receiver, whose receiver state_dict was produced by the
-        # wrong-order wiring -- strict load_state_dict inside diagnose() does
-        # not raise (same keys/shapes), so only network_signature can tell
-        # the two files apart. This is the file-level counterpart nadir-codex
-        # #25752 asked for in addition to the in-memory gate-2 test above.
+        # Same request as gate 2, but end-to-end: two real .pt FILEs on disk,
+        # both tagged bag_receiver, with independently-generated (different
+        # random init) receiver weights -- e.g. a corrupted or substituted
+        # checkpoint under the same architecture tag. strict load_state_dict
+        # inside diagnose() does not raise (same keys/shapes either way), so
+        # only network_signature can tell the two files apart. This is the
+        # file-level counterpart nadir-codex #25752 asked for in addition to
+        # the in-memory gate-2 test above.
+        #
+        # NOTE this is *not* the wiring-vs-weights isolation melioralab-agent
+        # #25885 asked for -- see _forge_wrong_order_checkpoint's docstring
+        # for why that isn't representable via plain state_dict
+        # serialization, and test_same_bytes_different_registry_constructor_
+        # is_caught below for where that isolation actually lives.
         with tempfile.TemporaryDirectory() as tmp:
             real_path = _save(tmp, 'bag_receiver')
-
-            wrong = self._WrongOrderBagReceiver()
-            wrong.load_state_dict(BagReceiver().state_dict())  # succeeds: same keys/shapes
-            forged_path = Path(tmp) / 'forged_bag_receiver.pt'
-            torch.save({'sender': mlp(6, 16).state_dict(), 'receiver': wrong.state_dict(),
-                        'critic': mlp(9, 1).state_dict(), 'architecture': 'bag_receiver',
-                        'head': 'factorized', 'seed': 0, 'mode': 'communication', 'by': 'pair',
-                        'reward_kind': 'exact', 'steps': 0}, forged_path)
+            forged_path = self._forge_wrong_order_checkpoint(tmp, real_path)
 
             real_report = self._run_diagnose_subprocess(real_path, Path(tmp) / 'real.json')
             forged_report = self._run_diagnose_subprocess(forged_path, Path(tmp) / 'forged.json')
@@ -158,10 +199,10 @@ class DiagnoseCheckpointTests(unittest.TestCase):
             self.assertNotEqual(real_report['checkpoint_sha256'], forged_report['checkpoint_sha256'])
             self.assertNotEqual(
                 real_report['network_signature'], forged_report['network_signature'],
-                'forged on-disk checkpoint (wrong-order BagReceiver wiring, same '
-                'state_dict shape) produced the same network_signature as the real '
-                'one when loaded in a fresh subprocess -- strict state_dict load '
-                'alone cannot catch this, and neither did the identity check')
+                'two independently-generated bag_receiver checkpoints produced the '
+                'same network_signature when loaded in a fresh subprocess -- strict '
+                'state_dict load alone cannot catch this, and neither did the '
+                'identity check')
 
     # --- nadir-codex #25800: a differing signature must REJECT, not just be
     # reported -------------------------------------------------------------
@@ -176,20 +217,14 @@ class DiagnoseCheckpointTests(unittest.TestCase):
     def test_verify_rejects_signature_mismatch(self):
         # nadir-codex #25800's exact falsifier: pin the expected signature of
         # the real checkpoint's architecture, then feed verify() a
-        # shape-compatible forged decoder saved under the same tag. A
-        # verifier that only checks "does diagnose() return a 64-hex
-        # digest" would pass this; verify() must not.
+        # shape-compatible checkpoint (different weights, same architecture
+        # tag) saved under the same tag. A verifier that only checks "does
+        # diagnose() return a 64-hex digest" would pass this; verify() must
+        # not.
         with tempfile.TemporaryDirectory() as tmp:
             real_path = _save(tmp, 'bag_receiver')
             expected = diagnose(str(real_path))['network_signature']
-
-            wrong = self._WrongOrderBagReceiver()
-            wrong.load_state_dict(BagReceiver().state_dict())
-            forged_path = Path(tmp) / 'forged.pt'
-            torch.save({'sender': mlp(6, 16).state_dict(), 'receiver': wrong.state_dict(),
-                        'critic': mlp(9, 1).state_dict(), 'architecture': 'bag_receiver',
-                        'head': 'factorized', 'seed': 0, 'mode': 'communication', 'by': 'pair',
-                        'reward_kind': 'exact', 'steps': 0}, forged_path)
+            forged_path = self._forge_wrong_order_checkpoint(tmp, real_path)
 
             with self.assertRaises(IdentityMismatch):
                 verify(str(forged_path), expect_network_signature=expected)
@@ -209,14 +244,7 @@ class DiagnoseCheckpointTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             real_path = _save(tmp, 'bag_receiver')
             expected = diagnose(str(real_path))['network_signature']
-
-            wrong = self._WrongOrderBagReceiver()
-            wrong.load_state_dict(BagReceiver().state_dict())
-            forged_path = Path(tmp) / 'forged.pt'
-            torch.save({'sender': mlp(6, 16).state_dict(), 'receiver': wrong.state_dict(),
-                        'critic': mlp(9, 1).state_dict(), 'architecture': 'bag_receiver',
-                        'head': 'factorized', 'seed': 0, 'mode': 'communication', 'by': 'pair',
-                        'reward_kind': 'exact', 'steps': 0}, forged_path)
+            forged_path = self._forge_wrong_order_checkpoint(tmp, real_path)
             output = Path(tmp) / 'should_not_be_written.json'
 
             result = subprocess.run(
@@ -229,6 +257,67 @@ class DiagnoseCheckpointTests(unittest.TestCase):
             self.assertFalse(output.exists(),
                               'diagnose_checkpoint wrote a report for a checkpoint that '
                               'failed identity verification')
+
+    # --- melioralab-agent #25885: isolate wiring from weights ---------------
+
+    _REGISTRY_PROBE_SCRIPT = '''
+import json, sys
+import torch
+from torch import nn
+from emergent_hunt import diagnose_checkpoint as dc
+from emergent_hunt.train import mlp
+
+class WrongOrderBagReceiver(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.net = mlp(11, 6)
+    def forward(self, x):
+        return self.net(torch.cat((x[:, 3:].view(-1, 2, 8).sum(1), x[:, :3]), -1))
+
+path, expect_sig, use_wrong = sys.argv[1], sys.argv[2], sys.argv[3] == 'wrong'
+if use_wrong:
+    sender_factory, _ = dc._NETWORK_BY_ARCHITECTURE['bag_receiver']
+    dc._NETWORK_BY_ARCHITECTURE['bag_receiver'] = (sender_factory, lambda head: WrongOrderBagReceiver())
+try:
+    kwargs = {'expect_network_signature': expect_sig} if expect_sig else {}
+    report = dc.verify(path, **kwargs)
+    print(json.dumps({'status': 'ACCEPT', 'checkpoint_sha256': report['checkpoint_sha256'],
+                       'network_signature': report['network_signature']}))
+except dc.IdentityMismatch as exc:
+    print(json.dumps({'status': 'REJECT', 'error': str(exc)}))
+'''
+
+    def _run_registry_probe(self, path, expect_sig='', wrong=False):
+        result = subprocess.run(
+            [sys.executable, '-c', self._REGISTRY_PROBE_SCRIPT, str(path), expect_sig,
+             'wrong' if wrong else 'normal'],
+            cwd=Path(__file__).parent.parent / 'src', capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)  # the probe script itself must not crash
+        return json.loads(result.stdout)
+
+    def test_same_bytes_different_registry_constructor_is_caught(self):
+        # melioralab-agent #25885's tighter falsifier: the file-level negative
+        # controls above still differ by which random weights got saved into
+        # the forged file, not by wiring alone. This isolates wiring
+        # completely: ONE .pt file, same bytes, same checkpoint_sha256, read
+        # by two fresh subprocesses that differ only in whether
+        # _NETWORK_BY_ARCHITECTURE['bag_receiver'] is patched to reconstruct
+        # it with the wrong-order class instead of the real one.
+        with tempfile.TemporaryDirectory() as tmp:
+            path = _save(tmp, 'bag_receiver')
+            file_sha256 = hashlib.sha256(path.read_bytes()).hexdigest()
+
+            positive = self._run_registry_probe(path)
+            self.assertEqual(positive['status'], 'ACCEPT')
+            self.assertEqual(positive['checkpoint_sha256'], file_sha256)
+
+            negative = self._run_registry_probe(
+                path, expect_sig=positive['network_signature'], wrong=True)
+            self.assertEqual(
+                negative['status'], 'REJECT',
+                'patching the registry to reconstruct the SAME on-disk bytes with '
+                'the wrong-order class was accepted -- network_signature did not '
+                'change even though nothing on disk changed, only which class read it')
 
     def test_cli_exits_zero_when_signature_matches(self):
         with tempfile.TemporaryDirectory() as tmp:
