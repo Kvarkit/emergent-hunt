@@ -205,7 +205,7 @@ def run(seed=0, episodes=3000, rounds=2, vocab=8, zones=4, use_messages=True,
         communication_task='symmetric', curriculum=False, type_count=3,
         coupled=False, receiver_aux=0.0, sender_aux=0.0,
         receiver_bootstrap_episodes=0, hidden_dim=32, holdout_mod=0,
-        auxiliary_decay=False):
+        auxiliary_decay=False, action_aux=0.0):
     if communication_task not in ('symmetric', 'one_way'):
         raise ValueError('communication_task must be symmetric or one_way')
     torch.manual_seed(seed); torch.set_num_threads(1)
@@ -250,7 +250,7 @@ def run(seed=0, episodes=3000, rounds=2, vocab=8, zones=4, use_messages=True,
                                        _pair_is_held_out(trap_t.item(), trap_z.item(), zones, holdout_mod)):
                 break
         last_a = torch.zeros(1,vocab); last_b = torch.zeros(1,vocab)
-        logs=[]; values=[]; aux_losses=[]; sender_losses=[]
+        logs=[]; values=[]; aux_losses=[]; sender_losses=[]; action_losses=[]
         active_task = ('one_way' if curriculum and ep <= episodes // 2
                        else communication_task)
         for r in range(rounds):
@@ -308,6 +308,8 @@ def run(seed=0, episodes=3000, rounds=2, vocab=8, zones=4, use_messages=True,
                 a_type_logits = a_decode
                 aux_losses.append(0.5 * (cross_entropy(a_type_logits, trap_t) +
                                          cross_entropy(b_type_logits, prey_t)))
+            action_losses.append(cross_entropy(aa, prey_z * type_count + trap_t) +
+                                cross_entropy(ab, trap_z * type_count + prey_t))
         a_zone, a_guess_trap = act_a // type_count, act_a % type_count
         b_zone, b_guess_prey = act_b // type_count, act_b % type_count
         zone_score = 0.5 * ((a_zone == prey_z).float() + (b_zone == trap_z).float())
@@ -331,8 +333,10 @@ def run(seed=0, episodes=3000, rounds=2, vocab=8, zones=4, use_messages=True,
         decay = max(0.0, 1.0 - ep / episodes) if auxiliary_decay else 1.0
         effective_aux = receiver_aux * decay if use_messages else 0.0
         effective_sender_aux = sender_aux * decay if use_messages else 0.0
+        effective_action_aux = action_aux * decay if use_messages else 0.0
         loss = (policy_loss + effective_aux * sum(aux_losses) / rounds +
-                effective_sender_aux * sum(sender_losses) / rounds)
+                effective_sender_aux * sum(sender_losses) / rounds +
+                effective_action_aux * sum(action_losses) / rounds)
         opt.zero_grad(); loss.backward(); nn.utils.clip_grad_norm_(params, 5); opt.step()
         recent.append(reward.item())
         if len(recent) > 100: recent.pop(0)
@@ -351,6 +355,7 @@ def run(seed=0, episodes=3000, rounds=2, vocab=8, zones=4, use_messages=True,
             'hidden_dim': hidden_dim,
             'holdout_mod': holdout_mod,
             'auxiliary_decay': auxiliary_decay,
+            'action_aux': action_aux,
             'seconds':time.perf_counter()-start,'history':records,
             'fixed_grid_eval': _fixed_grid_eval(a, b, eval_task, rounds, vocab, zones, type_count, use_messages),
             'heldout_grid_eval': _heldout_grid_eval(a, b, eval_task, rounds, vocab, zones, type_count, use_messages, holdout_mod),
@@ -439,9 +444,10 @@ def main():
     p.add_argument('--hidden-dim',type=int,default=32)
     p.add_argument('--holdout-mod',type=int,default=0)
     p.add_argument('--auxiliary-decay',action='store_true')
+    p.add_argument('--action-aux',type=float,default=0.0)
     args=p.parse_args(); out=Path(args.output); out.parent.mkdir(parents=True,exist_ok=True); all=[]
     for s in args.seeds:
         for m in (True,False):
-            r=run(s,args.episodes,rounds=args.rounds,zones=args.zones,type_count=args.type_count,use_messages=m,communication_task=args.task,curriculum=args.curriculum,coupled=args.coupled,receiver_aux=args.receiver_aux,sender_aux=args.sender_aux,receiver_bootstrap_episodes=args.receiver_bootstrap,hidden_dim=args.hidden_dim,holdout_mod=args.holdout_mod,auxiliary_decay=args.auxiliary_decay); all.append(r); out.write_text(json.dumps(all,indent=2)); print(json.dumps({'seed':s,'messages':m,'task':args.task,'curriculum':args.curriculum,'coupled':args.coupled,'hidden_dim':args.hidden_dim,'holdout_mod':args.holdout_mod,'last':r['history'][-1],'eval':r['fixed_grid_eval'],'heldout':r['heldout_grid_eval'],'protocol':r['protocol_diagnostics']}),flush=True)
+            r=run(s,args.episodes,rounds=args.rounds,zones=args.zones,type_count=args.type_count,use_messages=m,communication_task=args.task,curriculum=args.curriculum,coupled=args.coupled,receiver_aux=args.receiver_aux,sender_aux=args.sender_aux,receiver_bootstrap_episodes=args.receiver_bootstrap,hidden_dim=args.hidden_dim,holdout_mod=args.holdout_mod,auxiliary_decay=args.auxiliary_decay,action_aux=args.action_aux); all.append(r); out.write_text(json.dumps(all,indent=2)); print(json.dumps({'seed':s,'messages':m,'task':args.task,'curriculum':args.curriculum,'coupled':args.coupled,'hidden_dim':args.hidden_dim,'holdout_mod':args.holdout_mod,'action_aux':args.action_aux,'last':r['history'][-1],'eval':r['fixed_grid_eval'],'heldout':r['heldout_grid_eval'],'protocol':r['protocol_diagnostics']}),flush=True)
 
 if __name__ == '__main__': main()

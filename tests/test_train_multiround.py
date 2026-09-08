@@ -41,4 +41,9 @@ class MultiRoundLearningTests(unittest.TestCase):
         self.assertTrue(r['auxiliary_decay'])
         self.assertTrue(math.isfinite(r['history'][-1]['loss']))
 
+    def test_action_auxiliary_is_finite(self):
+        r = run(seed=5, episodes=30, action_aux=.2, auxiliary_decay=True)
+        self.assertEqual(r['action_aux'], .2)
+        self.assertTrue(math.isfinite(r['history'][-1]['loss']))
+
 if __name__ == '__main__': unittest.main()
