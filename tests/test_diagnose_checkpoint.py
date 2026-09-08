@@ -319,6 +319,65 @@ except dc.IdentityMismatch as exc:
                 'the wrong-order class was accepted -- network_signature did not '
                 'change even though nothing on disk changed, only which class read it')
 
+    _CLI_REGISTRY_SWAP_SCRIPT = '''
+import runpy, sys
+import torch
+from torch import nn
+from emergent_hunt import train
+
+class WrongOrderBagReceiver(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.net = train.mlp(11, 6)
+    def forward(self, x):
+        return self.net(torch.cat((x[:, 3:].view(-1, 2, 8).sum(1), x[:, :3]), -1))
+
+train.BagReceiver = WrongOrderBagReceiver
+runpy.run_module('emergent_hunt.diagnose_checkpoint', run_name='__main__')
+'''
+
+    def test_cli_exits_nonzero_when_registry_reconstructs_wrong_class(self):
+        # melioralab-agent #25969: test_same_bytes_different_registry_
+        # constructor_is_caught above only drives verify() directly and
+        # catches IdentityMismatch in-process (the probe script's own exit
+        # code is always 0 -- it's the probe that must not crash, not the
+        # CLI it's imitating). That leaves the ACTUAL CLI's fail-closed
+        # behavior (nonzero exit, REJECT to stderr, no output file) under a
+        # registry-level wiring swap unverified by the suite -- melioralab
+        # confirmed it by hand via runpy.run_module with train.BagReceiver
+        # patched before the module executes as __main__, and asked for it
+        # to be folded into the suite. This is that: same technique (patch
+        # train.BagReceiver -- not dc._NETWORK_BY_ARCHITECTURE, which
+        # wouldn't survive run_module's fresh re-exec of diagnose_checkpoint
+        # -- so the module's own `from .train import BagReceiver` picks up
+        # the patched class via the already-cached train module), driven as
+        # a real subprocess so returncode/stderr/file-existence are the
+        # actual CLI's, not a stand-in.
+        with tempfile.TemporaryDirectory() as tmp:
+            real_path = _save(tmp, 'bag_receiver')
+            expected = diagnose(str(real_path))['network_signature']
+            expected_sha = hashlib.sha256(real_path.read_bytes()).hexdigest()
+            output = Path(tmp) / 'should_not_be_written.json'
+
+            result = subprocess.run(
+                [sys.executable, '-c', self._CLI_REGISTRY_SWAP_SCRIPT,
+                 str(real_path), '--output', str(output),
+                 '--expect-checkpoint-sha256', expected_sha,
+                 '--expect-network-signature', expected],
+                cwd=Path(__file__).parent.parent / 'src', capture_output=True, text=True)
+
+            self.assertNotEqual(
+                result.returncode, 0,
+                'CLI exited 0 for a checkpoint reconstructed with a registry-swapped '
+                'wrong-order class, same bytes on disk as the pinned real checkpoint')
+            self.assertIn('REJECT', result.stderr)
+            self.assertFalse(output.exists(),
+                              'diagnose_checkpoint wrote a report under a registry-level '
+                              'wiring swap that should have failed identity verification')
+            self.assertEqual(hashlib.sha256(real_path.read_bytes()).hexdigest(), expected_sha,
+                              'the on-disk checkpoint changed across the probe -- not the '
+                              'same-bytes scenario this test claims to be')
+
     def test_cli_exits_zero_when_signature_matches(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = _save(tmp, 'bag_receiver')
