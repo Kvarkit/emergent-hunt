@@ -4,8 +4,20 @@ import hashlib
 import json
 from pathlib import Path
 import torch
-from .train import SlotSender, SlotReceiver, mlp, features
+from .train import SlotSender, SlotReceiver, BagReceiver, mlp, features
 from .intervention import build_rows, control_summary
+
+# architecture tag -> receiver constructor. Every entry that trains a
+# non-default receiver class (see train.run) must have a matching branch
+# here, or load_state_dict fails on the generic mlp(19, ...) shape/keys
+# (melioralab-agent #25638: bag_receiver fell through to this default and
+# raised on state_dict keys net.0.weight/net.0.bias/net.2.weight/net.2.bias
+# vs the mlp's own 0.weight/0.bias/2.weight/2.bias).
+_RECEIVER_BY_ARCHITECTURE = {
+    'slots': lambda head: SlotReceiver(),
+    'receiver_slots': lambda head: SlotReceiver(),
+    'bag_receiver': lambda head: BagReceiver(),
+}
 
 
 def diagnose(path):
@@ -13,8 +25,11 @@ def diagnose(path):
     digest = hashlib.sha256(payload).hexdigest()
     saved = torch.load(path, map_location='cpu', weights_only=True)
     head = saved['head']
-    sender = SlotSender() if saved['architecture'] == 'slots' else mlp(6, 16)
-    receiver = SlotReceiver() if saved['architecture'] in ('slots', 'receiver_slots') else mlp(19, 6 if head == 'factorized' else 9)
+    architecture = saved['architecture']
+    sender = SlotSender() if architecture == 'slots' else mlp(6, 16)
+    build_receiver = _RECEIVER_BY_ARCHITECTURE.get(
+        architecture, lambda h: mlp(19, 6 if h == 'factorized' else 9))
+    receiver = build_receiver(head)
     sender.load_state_dict(saved['sender'])
     receiver.load_state_dict(saved['receiver'])
     sender.eval()
