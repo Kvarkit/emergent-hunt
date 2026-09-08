@@ -73,6 +73,69 @@ def _fixed_grid_eval(a, b, task, rounds=2, vocab=8, zones=4, type_count=3):
     return {k: v / count for k, v in totals.items()}
 
 
+def _protocol_diagnostics(a, b, task, rounds=2, vocab=8, zones=4, type_count=3):
+    """Separate production purity, oracle comprehension and do(token) effect."""
+    rows = []
+    with torch.no_grad():
+        for prey_t in range(type_count):
+            for prey_z in range(zones):
+                for trap_t in range(type_count):
+                    for trap_z in range(zones):
+                        last_a = torch.zeros(1, vocab); last_b = torch.zeros(1, vocab)
+                        for r in range(rounds):
+                            marker = oh(torch.tensor([r]), rounds)
+                            pa = torch.cat((oh(torch.tensor([prey_t]), type_count), oh(torch.tensor([prey_z]), zones), marker), -1)
+                            pb = torch.cat((oh(torch.tensor([trap_t]), type_count), oh(torch.tensor([trap_z]), zones), marker), -1)
+                            ta, _, _ = a(pa, last_b); tb, _, _ = b(pb, last_a)
+                            ma = ta.argmax(-1); mb = tb.argmax(-1) if task == 'symmetric' else None
+                            if task == 'symmetric': last_a, last_b = oh(mb, vocab), oh(ma, vocab)
+                            else: last_a, last_b = torch.zeros_like(last_a), oh(ma, vocab)
+                            _, aa, _ = a(pa, last_b); _, ab, _ = b(pb, last_a)
+                        rows.append((prey_t, trap_t, ma.item(), mb.item() if mb is not None else -1))
+
+    def purity(label_index, token_index):
+        score = 0.0
+        for label in range(type_count):
+            tokens = [r[token_index] for r in rows if r[label_index] == label]
+            counts = [tokens.count(k) for k in range(vocab)]
+            score += max(counts) / max(1, len(tokens))
+        return score / type_count
+
+    prey_to_a = []
+    trap_to_b = []
+    for label in range(type_count):
+        vals = [r[2] for r in rows if r[0] == label]
+        prey_to_a.append(max(set(vals), key=vals.count))
+        if task == 'symmetric':
+            vals = [r[3] for r in rows if r[1] == label]
+            trap_to_b.append(max(set(vals), key=vals.count))
+
+    oracle_hits = 0.0; oracle_total = 0; sensitivity = 0.0
+    with torch.no_grad():
+        for prey_t in range(type_count):
+            for prey_z in range(zones):
+                for trap_t in range(type_count):
+                    for trap_z in range(zones):
+                        marker = oh(torch.tensor([rounds - 1]), rounds)
+                        pa = torch.cat((oh(torch.tensor([prey_t]), type_count), oh(torch.tensor([prey_z]), zones), marker), -1)
+                        pb = torch.cat((oh(torch.tensor([trap_t]), type_count), oh(torch.tensor([trap_z]), zones), marker), -1)
+                        if task == 'one_way':
+                            _, ab, _ = b(pb, oh(torch.tensor([prey_to_a[prey_t]]), vocab))
+                            oracle_hits += (ab.argmax(-1) % type_count == prey_t).float().item()
+                            guesses = {int(b(pb, oh(torch.tensor([k]), vocab))[1].argmax(-1).item() % type_count) for k in range(vocab)}
+                        else:
+                            _, aa, _ = a(pa, oh(torch.tensor([trap_to_b[trap_t]]), vocab))
+                            _, ab, _ = b(pb, oh(torch.tensor([prey_to_a[prey_t]]), vocab))
+                            oracle_hits += 0.5 * ((aa.argmax(-1) % type_count == trap_t).float().item() + (ab.argmax(-1) % type_count == prey_t).float().item())
+                            guesses = {int(b(pb, oh(torch.tensor([k]), vocab))[1].argmax(-1).item() % type_count) for k in range(vocab)}
+                        oracle_total += 1
+                        sensitivity += len(guesses) / type_count
+    return {'production_purity_sender_a': purity(0, 2),
+            'production_purity_sender_b': (purity(1, 3) if task == 'symmetric' else None),
+            'oracle_receiver_type_accuracy': oracle_hits / oracle_total,
+            'receiver_token_sensitivity': sensitivity / oracle_total}
+
+
 def run(seed=0, episodes=3000, rounds=2, vocab=8, zones=4, use_messages=True,
         message_temperature=0.7, differentiable_messages=False,
         communication_task='symmetric', curriculum=False, type_count=3,
@@ -185,7 +248,8 @@ def run(seed=0, episodes=3000, rounds=2, vocab=8, zones=4, use_messages=True,
             'communication_task': communication_task, 'curriculum': curriculum,
             'coupled': coupled,
             'seconds':time.perf_counter()-start,'history':records,
-            'fixed_grid_eval': _fixed_grid_eval(a, b, eval_task, rounds, vocab, zones, type_count)}
+            'fixed_grid_eval': _fixed_grid_eval(a, b, eval_task, rounds, vocab, zones, type_count),
+            'protocol_diagnostics': _protocol_diagnostics(a, b, eval_task, rounds, vocab, zones, type_count)}
 
 
 def main():
@@ -199,6 +263,6 @@ def main():
     args=p.parse_args(); out=Path(args.output); out.parent.mkdir(parents=True,exist_ok=True); all=[]
     for s in args.seeds:
         for m in (True,False):
-            r=run(s,args.episodes,rounds=args.rounds,zones=args.zones,type_count=args.type_count,use_messages=m,communication_task=args.task,curriculum=args.curriculum,coupled=args.coupled); all.append(r); out.write_text(json.dumps(all,indent=2)); print(json.dumps({'seed':s,'messages':m,'task':args.task,'curriculum':args.curriculum,'coupled':args.coupled,'last':r['history'][-1],'eval':r['fixed_grid_eval']}),flush=True)
+            r=run(s,args.episodes,rounds=args.rounds,zones=args.zones,type_count=args.type_count,use_messages=m,communication_task=args.task,curriculum=args.curriculum,coupled=args.coupled); all.append(r); out.write_text(json.dumps(all,indent=2)); print(json.dumps({'seed':s,'messages':m,'task':args.task,'curriculum':args.curriculum,'coupled':args.coupled,'last':r['history'][-1],'eval':r['fixed_grid_eval'],'protocol':r['protocol_diagnostics']}),flush=True)
 
 if __name__ == '__main__': main()
