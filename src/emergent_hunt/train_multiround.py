@@ -11,17 +11,20 @@ def oh(x, n): return one_hot(x, n).float()
 
 
 class Agent(nn.Module):
-    def __init__(self, private_dim, vocab, action_dim, marker_dim=3, body=None):
+    def __init__(self, private_dim, vocab, action_dim, marker_dim=3, type_count=3, body=None):
         super().__init__()
         self.body = (body if body is not None else
                      nn.Sequential(nn.Linear(private_dim + marker_dim + vocab, 32), nn.Tanh()))
         self.token = nn.Linear(32, vocab)
-        self.action = nn.Linear(32, action_dim)
+        self.message_decoder = nn.Linear(vocab, type_count)
+        self.action = nn.Linear(32 + type_count, action_dim)
         self.value = nn.Linear(32, 1)
 
     def forward(self, private, incoming):
         h = self.body(torch.cat((private, incoming), -1))
-        return self.token(h), self.action(h), self.value(h).squeeze(-1)
+        message_type_logits = self.message_decoder(incoming)
+        action_h = torch.cat((h, message_type_logits.softmax(-1)), -1)
+        return self.token(h), self.action(action_h), self.value(h).squeeze(-1), message_type_logits
 
 
 def _fixed_grid_eval(a, b, task, rounds=2, vocab=8, zones=4, type_count=3):
@@ -41,8 +44,8 @@ def _fixed_grid_eval(a, b, task, rounds=2, vocab=8, zones=4, type_count=3):
                                             oh(torch.tensor([prey_z]), zones), marker), -1)
                             pb = torch.cat((oh(torch.tensor([trap_t]), type_count),
                                             oh(torch.tensor([trap_z]), zones), marker), -1)
-                            ta, _, _ = a(pa, last_b)
-                            tb, _, _ = b(pb, last_a)
+                            ta, _, _, _ = a(pa, last_b)
+                            tb, _, _, _ = b(pb, last_a)
                             ma = ta.argmax(-1)
                             mb = tb.argmax(-1) if task == 'symmetric' else None
                             if task == 'symmetric':
@@ -50,8 +53,8 @@ def _fixed_grid_eval(a, b, task, rounds=2, vocab=8, zones=4, type_count=3):
                             else:
                                 last_a = torch.zeros_like(last_a)
                                 last_b = oh(ma, vocab)
-                            _, aa, _ = a(pa, last_b)
-                            _, ab, _ = b(pb, last_a)
+                            _, aa, _, _ = a(pa, last_b)
+                            _, ab, _, _ = b(pb, last_a)
                             act_a, act_b = aa.argmax(-1), ab.argmax(-1)
                         a_zone, a_guess = act_a // type_count, act_a % type_count
                         b_zone, b_guess = act_b // type_count, act_b % type_count
@@ -86,11 +89,11 @@ def _protocol_diagnostics(a, b, task, rounds=2, vocab=8, zones=4, type_count=3):
                             marker = oh(torch.tensor([r]), rounds)
                             pa = torch.cat((oh(torch.tensor([prey_t]), type_count), oh(torch.tensor([prey_z]), zones), marker), -1)
                             pb = torch.cat((oh(torch.tensor([trap_t]), type_count), oh(torch.tensor([trap_z]), zones), marker), -1)
-                            ta, _, _ = a(pa, last_b); tb, _, _ = b(pb, last_a)
+                            ta, _, _, _ = a(pa, last_b); tb, _, _, _ = b(pb, last_a)
                             ma = ta.argmax(-1); mb = tb.argmax(-1) if task == 'symmetric' else None
                             if task == 'symmetric': last_a, last_b = oh(mb, vocab), oh(ma, vocab)
                             else: last_a, last_b = torch.zeros_like(last_a), oh(ma, vocab)
-                            _, aa, _ = a(pa, last_b); _, ab, _ = b(pb, last_a)
+                            _, aa, _, _ = a(pa, last_b); _, ab, _, _ = b(pb, last_a)
                         rows.append((prey_t, trap_t, ma.item(), mb.item() if mb is not None else -1))
 
     def purity(label_index, token_index):
@@ -101,14 +104,17 @@ def _protocol_diagnostics(a, b, task, rounds=2, vocab=8, zones=4, type_count=3):
             score += max(counts) / max(1, len(tokens))
         return score / type_count
 
-    prey_to_a = []
+    def dominant_tokens(label_index, token_index):
+        result = []
+        for label in range(type_count):
+            tokens = [r[token_index] for r in rows if r[label_index] == label]
+            result.append(max(set(tokens), key=tokens.count))
+        return result
+
+    prey_to_a = dominant_tokens(0, 2)
     trap_to_b = []
-    for label in range(type_count):
-        vals = [r[2] for r in rows if r[0] == label]
-        prey_to_a.append(max(set(vals), key=vals.count))
-        if task == 'symmetric':
-            vals = [r[3] for r in rows if r[1] == label]
-            trap_to_b.append(max(set(vals), key=vals.count))
+    if task == 'symmetric':
+        trap_to_b = dominant_tokens(1, 3)
 
     oracle_hits = 0.0; oracle_total = 0; sensitivity = 0.0
     with torch.no_grad():
@@ -120,18 +126,20 @@ def _protocol_diagnostics(a, b, task, rounds=2, vocab=8, zones=4, type_count=3):
                         pa = torch.cat((oh(torch.tensor([prey_t]), type_count), oh(torch.tensor([prey_z]), zones), marker), -1)
                         pb = torch.cat((oh(torch.tensor([trap_t]), type_count), oh(torch.tensor([trap_z]), zones), marker), -1)
                         if task == 'one_way':
-                            _, ab, _ = b(pb, oh(torch.tensor([prey_to_a[prey_t]]), vocab))
+                            _, ab, _, _ = b(pb, oh(torch.tensor([prey_to_a[prey_t]]), vocab))
                             oracle_hits += (ab.argmax(-1) % type_count == prey_t).float().item()
                             guesses = {int(b(pb, oh(torch.tensor([k]), vocab))[1].argmax(-1).item() % type_count) for k in range(vocab)}
                         else:
-                            _, aa, _ = a(pa, oh(torch.tensor([trap_to_b[trap_t]]), vocab))
-                            _, ab, _ = b(pb, oh(torch.tensor([prey_to_a[prey_t]]), vocab))
+                            _, aa, _, _ = a(pa, oh(torch.tensor([trap_to_b[trap_t]]), vocab))
+                            _, ab, _, _ = b(pb, oh(torch.tensor([prey_to_a[prey_t]]), vocab))
                             oracle_hits += 0.5 * ((aa.argmax(-1) % type_count == trap_t).float().item() + (ab.argmax(-1) % type_count == prey_t).float().item())
                             guesses = {int(b(pb, oh(torch.tensor([k]), vocab))[1].argmax(-1).item() % type_count) for k in range(vocab)}
                         oracle_total += 1
                         sensitivity += len(guesses) / type_count
     return {'production_purity_sender_a': purity(0, 2),
+            'production_injective_sender_a': len(set(prey_to_a)) / type_count,
             'production_purity_sender_b': (purity(1, 3) if task == 'symmetric' else None),
+            'production_injective_sender_b': (len(set(trap_to_b)) / type_count if task == 'symmetric' else None),
             'oracle_receiver_type_accuracy': oracle_hits / oracle_total,
             'receiver_token_sensitivity': sensitivity / oracle_total}
 
@@ -139,7 +147,8 @@ def _protocol_diagnostics(a, b, task, rounds=2, vocab=8, zones=4, type_count=3):
 def run(seed=0, episodes=3000, rounds=2, vocab=8, zones=4, use_messages=True,
         message_temperature=0.7, differentiable_messages=False,
         communication_task='symmetric', curriculum=False, type_count=3,
-        coupled=False, receiver_aux=0.0, sender_aux=0.0):
+        coupled=False, receiver_aux=0.0, sender_aux=0.0,
+        receiver_bootstrap_episodes=0):
     if communication_task not in ('symmetric', 'one_way'):
         raise ValueError('communication_task must be symmetric or one_way')
     torch.manual_seed(seed); torch.set_num_threads(1)
@@ -154,12 +163,14 @@ def run(seed=0, episodes=3000, rounds=2, vocab=8, zones=4, use_messages=True,
         shared_body = nn.Sequential(
             nn.Linear(type_count + zones + rounds + vocab, 32), nn.Tanh())
         a = Agent(type_count + zones, vocab, zones * type_count, rounds,
-                  body=shared_body)
+                  type_count=type_count, body=shared_body)
         b = Agent(type_count + zones, vocab, zones * type_count, rounds,
-                  body=shared_body)
+                  type_count=type_count, body=shared_body)
     else:
-        a, b = (Agent(type_count + zones, vocab, zones * type_count, rounds),
-                Agent(type_count + zones, vocab, zones * type_count, rounds))
+        a, b = (Agent(type_count + zones, vocab, zones * type_count, rounds,
+                      type_count=type_count),
+                Agent(type_count + zones, vocab, zones * type_count, rounds,
+                      type_count=type_count))
     params = []
     seen = set()
     for parameter in list(a.parameters()) + list(b.parameters()):
@@ -168,6 +179,8 @@ def run(seed=0, episodes=3000, rounds=2, vocab=8, zones=4, use_messages=True,
     opt = torch.optim.Adam(params, lr=.003)
     if receiver_aux < 0 or sender_aux < 0:
         raise ValueError('auxiliary coefficients must be nonnegative')
+    if receiver_bootstrap_episodes < 0:
+        raise ValueError('receiver_bootstrap_episodes must be nonnegative')
     records=[]; recent=[]; start=time.perf_counter()
     for ep in range(1, episodes+1):
         prey_t, prey_z = torch.randint(type_count,(1,)), torch.randint(zones,(1,))
@@ -180,10 +193,18 @@ def run(seed=0, episodes=3000, rounds=2, vocab=8, zones=4, use_messages=True,
             marker = oh(torch.tensor([r]), rounds)
             pa = torch.cat((oh(prey_t,type_count), oh(prey_z,zones), marker), -1)
             pb = torch.cat((oh(trap_t,type_count), oh(trap_z,zones), marker), -1)
-            ta, _, _ = a(pa, last_b)
-            tb, _, _ = b(pb, last_a)
+            ta, _, _, _ = a(pa, last_b)
+            tb, _, _, _ = b(pb, last_a)
             if use_messages:
-                if differentiable_messages:
+                teacher_forced = ep <= receiver_bootstrap_episodes
+                if teacher_forced:
+                    # A declared curriculum aid: the receiver first sees a
+                    # stable reference code. The hidden type is never added to
+                    # an observation and teacher forcing is disabled later.
+                    ma = prey_t.clone()
+                    mb = trap_t.clone() if active_task == 'symmetric' else None
+                    message_logs = []
+                elif differentiable_messages:
                     # Optional straight-through control. The default retains
                     # explicit message-policy REINFORCE below.
                     ma = gumbel_softmax(ta, tau=message_temperature, hard=True)
@@ -199,33 +220,32 @@ def run(seed=0, episodes=3000, rounds=2, vocab=8, zones=4, use_messages=True,
                     if active_task == 'symmetric':
                         message_logs.append(Categorical(logits=tb).log_prob(mb))
                 if active_task == 'symmetric':
-                    last_a, last_b = ((mb, ma) if differentiable_messages
-                                      else (oh(mb, vocab), oh(ma, vocab)))
+                    last_a, last_b = (oh(mb, vocab), oh(ma, vocab))
                 else:
                     last_a = torch.zeros_like(last_a)
-                    last_b = ma if differentiable_messages else oh(ma, vocab)
+                    last_b = oh(ma, vocab)
             else:
                 last_a, last_b = torch.zeros_like(last_a), torch.zeros_like(last_b)
                 message_logs = []
             # Action is chosen after exchange.  The type component is a
             # deliberate communication bottleneck: A must guess trap_t and B
             # must guess prey_t.
-            _, aa, va = a(pa, last_b)
-            _, ab, vb = b(pb, last_a)
+            _, aa, va, a_decode = a(pa, last_b)
+            _, ab, vb, b_decode = b(pb, last_a)
             daction, baction = Categorical(logits=aa), Categorical(logits=ab)
             act_a, act_b = daction.sample(), baction.sample()
             logs.append(sum(message_logs) + daction.log_prob(act_a) + baction.log_prob(act_b))
             values.append((va+vb)/2)
             # Privileged target is used only as an auxiliary training signal;
             # neither agent receives the partner type as an observation.
-            b_type_logits = ab.view(1, zones, type_count).logsumexp(1)
+            b_type_logits = b_decode
             sender_losses.append(cross_entropy(ta, prey_t))
             if active_task == 'symmetric':
                 sender_losses.append(cross_entropy(tb, trap_t))
             if active_task == 'one_way':
                 aux_losses.append(cross_entropy(b_type_logits, prey_t))
             else:
-                a_type_logits = aa.view(1, zones, type_count).logsumexp(1)
+                a_type_logits = a_decode
                 aux_losses.append(0.5 * (cross_entropy(a_type_logits, trap_t) +
                                          cross_entropy(b_type_logits, prey_t)))
         a_zone, a_guess_trap = act_a // type_count, act_a % type_count
@@ -266,6 +286,7 @@ def run(seed=0, episodes=3000, rounds=2, vocab=8, zones=4, use_messages=True,
     return {'seed':seed,'episodes':episodes,'rounds':rounds,'use_messages':use_messages,
             'communication_task': communication_task, 'curriculum': curriculum,
             'coupled': coupled, 'receiver_aux': receiver_aux, 'sender_aux': sender_aux,
+            'receiver_bootstrap_episodes': receiver_bootstrap_episodes,
             'seconds':time.perf_counter()-start,'history':records,
             'fixed_grid_eval': _fixed_grid_eval(a, b, eval_task, rounds, vocab, zones, type_count),
             'protocol_diagnostics': _protocol_diagnostics(a, b, eval_task, rounds, vocab, zones, type_count)}
@@ -279,11 +300,12 @@ def main():
     p.add_argument('--coupled',action='store_true')
     p.add_argument('--receiver-aux',type=float,default=0.0)
     p.add_argument('--sender-aux',type=float,default=0.0)
+    p.add_argument('--receiver-bootstrap',type=int,default=0)
     p.add_argument('--type-count',type=int,default=3); p.add_argument('--zones',type=int,default=4)
     p.add_argument('--rounds',type=int,default=2)
     args=p.parse_args(); out=Path(args.output); out.parent.mkdir(parents=True,exist_ok=True); all=[]
     for s in args.seeds:
         for m in (True,False):
-            r=run(s,args.episodes,rounds=args.rounds,zones=args.zones,type_count=args.type_count,use_messages=m,communication_task=args.task,curriculum=args.curriculum,coupled=args.coupled,receiver_aux=args.receiver_aux,sender_aux=args.sender_aux); all.append(r); out.write_text(json.dumps(all,indent=2)); print(json.dumps({'seed':s,'messages':m,'task':args.task,'curriculum':args.curriculum,'coupled':args.coupled,'receiver_aux':args.receiver_aux,'sender_aux':args.sender_aux,'last':r['history'][-1],'eval':r['fixed_grid_eval'],'protocol':r['protocol_diagnostics']}),flush=True)
+            r=run(s,args.episodes,rounds=args.rounds,zones=args.zones,type_count=args.type_count,use_messages=m,communication_task=args.task,curriculum=args.curriculum,coupled=args.coupled,receiver_aux=args.receiver_aux,sender_aux=args.sender_aux,receiver_bootstrap_episodes=args.receiver_bootstrap); all.append(r); out.write_text(json.dumps(all,indent=2)); print(json.dumps({'seed':s,'messages':m,'task':args.task,'curriculum':args.curriculum,'coupled':args.coupled,'receiver_aux':args.receiver_aux,'sender_aux':args.sender_aux,'bootstrap':args.receiver_bootstrap,'last':r['history'][-1],'eval':r['fixed_grid_eval'],'protocol':r['protocol_diagnostics']}),flush=True)
 
 if __name__ == '__main__': main()
