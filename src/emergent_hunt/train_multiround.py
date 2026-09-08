@@ -28,7 +28,8 @@ class Agent(nn.Module):
         return self.token(h), self.action(action_h), self.value(h).squeeze(-1), message_type_logits
 
 
-def _fixed_grid_eval(a, b, task, rounds=2, vocab=8, zones=4, type_count=3):
+def _fixed_grid_eval(a, b, task, rounds=2, vocab=8, zones=4, type_count=3,
+                     use_messages=True):
     """Deterministic argmax evaluation over every latent state."""
     totals = {'zone_score': 0.0, 'type_score': 0.0, 'terminal_success': 0.0}
     count = type_count * zones * type_count * zones
@@ -49,11 +50,14 @@ def _fixed_grid_eval(a, b, task, rounds=2, vocab=8, zones=4, type_count=3):
                             tb, _, _, _ = b(pb, last_a)
                             ma = ta.argmax(-1)
                             mb = tb.argmax(-1) if task == 'symmetric' else None
-                            if task == 'symmetric':
-                                last_a, last_b = oh(mb, vocab), oh(ma, vocab)
+                            if task == 'symmetric' and use_messages:
+                                # A reads last_b, B reads last_a: each must
+                                # receive the partner's token.
+                                last_a, last_b = oh(ma, vocab), oh(mb, vocab)
+                            elif task == 'one_way' and use_messages:
+                                last_a, last_b = oh(ma, vocab), torch.zeros_like(last_b)
                             else:
-                                last_a = oh(ma, vocab)
-                                last_b = torch.zeros_like(last_b)
+                                last_a, last_b = torch.zeros_like(last_a), torch.zeros_like(last_b)
                             _, aa, _, _ = a(pa, last_b)
                             _, ab, _, _ = b(pb, last_a)
                             act_a, act_b = aa.argmax(-1), ab.argmax(-1)
@@ -77,7 +81,8 @@ def _fixed_grid_eval(a, b, task, rounds=2, vocab=8, zones=4, type_count=3):
     return {k: v / count for k, v in totals.items()}
 
 
-def _protocol_diagnostics(a, b, task, rounds=2, vocab=8, zones=4, type_count=3):
+def _protocol_diagnostics(a, b, task, rounds=2, vocab=8, zones=4, type_count=3,
+                          use_messages=True):
     """Separate production purity, oracle comprehension and do(token) effect."""
     rows = []
     with torch.no_grad():
@@ -92,8 +97,12 @@ def _protocol_diagnostics(a, b, task, rounds=2, vocab=8, zones=4, type_count=3):
                             pb = torch.cat((oh(torch.tensor([trap_t]), type_count), oh(torch.tensor([trap_z]), zones), marker), -1)
                             ta, _, _, _ = a(pa, last_b); tb, _, _, _ = b(pb, last_a)
                             ma = ta.argmax(-1); mb = tb.argmax(-1) if task == 'symmetric' else None
-                            if task == 'symmetric': last_a, last_b = oh(mb, vocab), oh(ma, vocab)
-                            else: last_a, last_b = oh(ma, vocab), torch.zeros_like(last_b)
+                            if task == 'symmetric' and use_messages:
+                                last_a, last_b = oh(ma, vocab), oh(mb, vocab)
+                            elif task == 'one_way' and use_messages:
+                                last_a, last_b = oh(ma, vocab), torch.zeros_like(last_b)
+                            else:
+                                last_a, last_b = torch.zeros_like(last_a), torch.zeros_like(last_b)
                             _, aa, _, _ = a(pa, last_b); _, ab, _, _ = b(pb, last_a)
                         rows.append((prey_t, trap_t, ma.item(), mb.item() if mb is not None else -1))
 
@@ -221,7 +230,7 @@ def run(seed=0, episodes=3000, rounds=2, vocab=8, zones=4, use_messages=True,
                     if active_task == 'symmetric':
                         message_logs.append(Categorical(logits=tb).log_prob(mb))
                 if active_task == 'symmetric':
-                    last_a, last_b = (oh(mb, vocab), oh(ma, vocab))
+                    last_a, last_b = (oh(ma, vocab), oh(mb, vocab))
                 else:
                     last_a = oh(ma, vocab)
                     last_b = torch.zeros_like(last_b)
@@ -290,8 +299,8 @@ def run(seed=0, episodes=3000, rounds=2, vocab=8, zones=4, use_messages=True,
             'receiver_bootstrap_episodes': receiver_bootstrap_episodes,
             'hidden_dim': hidden_dim,
             'seconds':time.perf_counter()-start,'history':records,
-            'fixed_grid_eval': _fixed_grid_eval(a, b, eval_task, rounds, vocab, zones, type_count),
-            'protocol_diagnostics': _protocol_diagnostics(a, b, eval_task, rounds, vocab, zones, type_count)}
+            'fixed_grid_eval': _fixed_grid_eval(a, b, eval_task, rounds, vocab, zones, type_count, use_messages),
+            'protocol_diagnostics': _protocol_diagnostics(a, b, eval_task, rounds, vocab, zones, type_count, use_messages)}
 
 
 def run_staged_one_way(seed=0, sender_episodes=1000, receiver_episodes=2000,
