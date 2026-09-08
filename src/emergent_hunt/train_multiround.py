@@ -24,7 +24,10 @@ class Agent(nn.Module):
 
 
 def run(seed=0, episodes=3000, rounds=2, vocab=8, zones=4, use_messages=True,
-        message_temperature=0.7):
+        message_temperature=0.7, differentiable_messages=False,
+        communication_task='symmetric'):
+    if communication_task not in ('symmetric', 'one_way'):
+        raise ValueError('communication_task must be symmetric or one_way')
     torch.manual_seed(seed); torch.set_num_threads(1)
     # private = type (3) + zone (4); incoming = last token (8) + round marker (3)
     # An action is (own zone, guess of the partner's hidden type).  The
@@ -47,15 +50,30 @@ def run(seed=0, episodes=3000, rounds=2, vocab=8, zones=4, use_messages=True,
             ta, _, _ = a(pa, last_b)
             tb, _, _ = b(pb, last_a)
             if use_messages:
-                # Straight-through: hard one-hot message in the forward pass,
-                # continuous Gumbel gradient in the backward pass. This keeps
-                # the channel discrete at execution time while reducing the
-                # sender/receiver credit-assignment variance of REINFORCE.
-                ma = gumbel_softmax(ta, tau=message_temperature, hard=True)
-                mb = gumbel_softmax(tb, tau=message_temperature, hard=True)
-                last_a, last_b = mb, ma
+                if differentiable_messages:
+                    # Optional straight-through control. The default retains
+                    # explicit message-policy REINFORCE below.
+                    ma = gumbel_softmax(ta, tau=message_temperature, hard=True)
+                    mb = (gumbel_softmax(tb, tau=message_temperature, hard=True)
+                          if communication_task == 'symmetric' else None)
+                    message_logs = []
+                else:
+                    da = Categorical(logits=ta)
+                    ma = da.sample()
+                    mb = (Categorical(logits=tb).sample()
+                          if communication_task == 'symmetric' else None)
+                    message_logs = [da.log_prob(ma)]
+                    if communication_task == 'symmetric':
+                        message_logs.append(Categorical(logits=tb).log_prob(mb))
+                if communication_task == 'symmetric':
+                    last_a, last_b = ((mb, ma) if differentiable_messages
+                                      else (oh(mb, vocab), oh(ma, vocab)))
+                else:
+                    last_a = torch.zeros_like(last_a)
+                    last_b = ma if differentiable_messages else oh(ma, vocab)
             else:
                 last_a, last_b = torch.zeros_like(last_a), torch.zeros_like(last_b)
+                message_logs = []
             # Action is chosen after exchange.  The type component is a
             # deliberate communication bottleneck: A must guess trap_t and B
             # must guess prey_t.
@@ -63,16 +81,21 @@ def run(seed=0, episodes=3000, rounds=2, vocab=8, zones=4, use_messages=True,
             _, ab, vb = b(pb, last_a)
             daction, baction = Categorical(logits=aa), Categorical(logits=ab)
             act_a, act_b = daction.sample(), baction.sample()
-            logs.append(daction.log_prob(act_a)+baction.log_prob(act_b))
+            logs.append(sum(message_logs) + daction.log_prob(act_a) + baction.log_prob(act_b))
             values.append((va+vb)/2)
         a_zone, a_guess_trap = act_a // type_count, act_a % type_count
         b_zone, b_guess_prey = act_b // type_count, act_b % type_count
         zone_score = 0.5 * ((a_zone == prey_z).float() + (b_zone == trap_z).float())
-        type_score = 0.5 * ((a_guess_trap == trap_t).float() +
-                            (b_guess_prey == prey_t).float())
-        terminal = ((a_zone == prey_z) & (b_zone == trap_z) &
-                    (a_guess_trap == trap_t) & (b_guess_prey == prey_t) &
-                    (prey_t != trap_t)).float()
+        if communication_task == 'one_way':
+            type_score = (b_guess_prey == prey_t).float()
+            terminal = ((a_zone == prey_z) & (b_zone == trap_z) &
+                        (b_guess_prey == prey_t)).float()
+        else:
+            type_score = 0.5 * ((a_guess_trap == trap_t).float() +
+                                (b_guess_prey == prey_t).float())
+            terminal = ((a_zone == prey_z) & (b_zone == trap_z) &
+                        (a_guess_trap == trap_t) & (b_guess_prey == prey_t) &
+                        (prey_t != trap_t)).float()
         # Dense components make the communication-dependent type prediction
         # learnable under REINFORCE; terminal remains a separately weighted
         # success signal rather than being silently conflated with shaping.
@@ -96,9 +119,10 @@ def run(seed=0, episodes=3000, rounds=2, vocab=8, zones=4, use_messages=True,
 def main():
     p=argparse.ArgumentParser(); p.add_argument('--episodes',type=int,default=3000)
     p.add_argument('--seeds',type=int,nargs='+',default=[0,1,2]); p.add_argument('--output',default='results/multiround-smoke.json')
+    p.add_argument('--task',choices=['symmetric','one_way'],default='symmetric')
     args=p.parse_args(); out=Path(args.output); out.parent.mkdir(parents=True,exist_ok=True); all=[]
     for s in args.seeds:
         for m in (True,False):
-            r=run(s,args.episodes,use_messages=m); all.append(r); out.write_text(json.dumps(all,indent=2)); print(json.dumps({'seed':s,'messages':m,'last':r['history'][-1]}),flush=True)
+            r=run(s,args.episodes,use_messages=m,communication_task=args.task); all.append(r); out.write_text(json.dumps(all,indent=2)); print(json.dumps({'seed':s,'messages':m,'task':args.task,'last':r['history'][-1]}),flush=True)
 
 if __name__ == '__main__': main()
