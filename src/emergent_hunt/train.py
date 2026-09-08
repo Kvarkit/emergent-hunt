@@ -40,12 +40,22 @@ class SlotReceiver(nn.Module):
         return torch.cat([net(x[:, 3+i*8:3+(i+1)*8]) for i, net in enumerate(self.slots)], -1)
 
 
+class BagReceiver(nn.Module):
+    """Permutation-invariant receiver: token order is discarded by summation."""
+    def __init__(self):
+        super().__init__()
+        self.net = mlp(11, 6)
+
+    def forward(self, x):
+        return self.net(torch.cat((x[:, :3], x[:, 3:].view(-1, 2, 8).sum(1)), -1))
+
+
 def corpus(split, by='triple'):
     return torch.tensor([(s.prey, s.direction, s.trap) for s in states(split=split, by=by)])
 
 
 @torch.no_grad()
-def evaluate(sender, receiver, mode, by='triple', head='joint'):
+def evaluate(sender, receiver, mode, by='triple', head='joint', architecture='mlp'):
     result = {}
     code = sender(features(torch.cartesian_prod(torch.arange(3), torch.arange(3)), 3)).view(-1, 2, 8).argmax(-1)
     for split in ('train', 'test', 'all'):
@@ -81,18 +91,20 @@ def run(seed=0, mode='communication', steps=2000, batch=128, by='triple', head='
     torch.manual_seed(seed)
     torch.set_num_threads(1)
     sender, receiver, critic = mlp(6, 16), mlp(19, 6 if head == 'factorized' else 9), mlp(9, 1)
-    if architecture in ('slots', 'receiver_slots'):
+    if architecture in ('slots', 'receiver_slots', 'bag_receiver'):
         if head != 'factorized':
             raise ValueError('slots requires factorized head')
         if architecture == 'slots':
             sender, receiver = SlotSender(), SlotReceiver()
+        elif architecture == 'bag_receiver':
+            receiver = BagReceiver()
         else:
             receiver = SlotReceiver()
     optimizer = torch.optim.Adam(list(sender.parameters()) + list(receiver.parameters()) + list(critic.parameters()), lr=.003)
     data = corpus('train', by)
     history = []
     start = time.perf_counter()
-    initial = evaluate(sender, receiver, mode, by, head)
+    initial = evaluate(sender, receiver, mode, by, head, architecture)
     for step in range(1, steps + 1):
         x = data[torch.randint(len(data), (batch,))]
         send_dist = Categorical(logits=sender(features(x[:, :2], 3)).view(-1, 2, 8))
@@ -131,7 +143,7 @@ def run(seed=0, mode='communication', steps=2000, batch=128, by='triple', head='
         if step == 1 or step % 200 == 0 or step == steps:
             row = {'step':step, 'sample_reward':reward.mean().item(), 'actor_loss':actor_loss.item(),
                    'critic_mse':critic_loss.item(), 'entropy':entropy.mean().item(), 'grad_norm':grad.item(),
-                   'evaluation':evaluate(sender, receiver, mode, by, head)}
+                   'evaluation':evaluate(sender, receiver, mode, by, head, architecture)}
             history.append(row)
     if checkpoint:
         torch.save({'sender':sender.state_dict(), 'receiver':receiver.state_dict(),
@@ -151,11 +163,11 @@ def main():
     parser.add_argument('--by', choices=['triple', 'pair'], default='triple')
     parser.add_argument('--head', choices=['joint', 'factorized'], default='joint')
     parser.add_argument('--reward', choices=['exact', 'factor'], default='exact')
-    parser.add_argument('--architecture', choices=['mlp', 'slots', 'receiver_slots'], default='mlp')
+    parser.add_argument('--architecture', choices=['mlp', 'slots', 'receiver_slots', 'bag_receiver'], default='mlp')
     args = parser.parse_args()
     if args.steps < 1:
         parser.error('steps must be positive')
-    if args.architecture in ('slots', 'receiver_slots') and args.head != 'factorized':
+    if args.architecture in ('slots', 'receiver_slots', 'bag_receiver') and args.head != 'factorized':
         parser.error('slots requires --head factorized')
     results = []
     target = Path(args.output)
