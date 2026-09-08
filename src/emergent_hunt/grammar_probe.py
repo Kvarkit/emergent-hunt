@@ -6,6 +6,7 @@ associations, positional stability, and compositional transfer indicators.
 """
 from collections import Counter, defaultdict
 from math import log2
+import random
 
 
 def _entropy(counts):
@@ -51,6 +52,9 @@ def probe(records, vocab):
                  for r in records]
     factors = sorted(records[0]["factors"])
     out = {"n": len(records), "width": width, "factors": {}}
+    out["warnings"] = []
+    if len(records) < 30:
+        out["warnings"].append("small_sample: use >=30 trajectories")
     for factor in factors:
         values = [r["factors"][factor] for r in records]
         positions = {}
@@ -62,6 +66,19 @@ def probe(records, vocab):
             }
         out["factors"][factor] = {"positions": positions,
                                   "sequence_normalized_mi": normalized_mi(sequences, values)}
+
+    best_positions = {}
+    for factor, report in out["factors"].items():
+        best_positions[factor] = max(
+            report["positions"],
+            key=lambda p: report["positions"][p]["normalized_mi"])
+    out["best_factor_positions"] = best_positions
+    out["candidate_factorized_structure"] = (
+        width >= len(factors) >= 2 and
+        len(set(best_positions.values())) == len(best_positions) and
+        all(out["factors"][f]["positions"][best_positions[f]]["normalized_mi"] >= .5
+            for f in factors)
+    )
 
     transitions = Counter((seq[i], seq[i + 1]) for seq in sequences for i in range(width - 1))
     out["token_transitions"] = {
@@ -82,4 +99,33 @@ def probe(records, vocab):
     out["unique_token_sequences"] = len({s for _, s in combos})
     out["token_sequence_collision_rate"] = 1.0 - (
         out["unique_token_sequences"] / max(1, len(records)))
+    if out["unique_token_sequences"] >= len(records) * 0.8:
+        out["warnings"].append("near_unique_sequences: sequence_mi may be spurious")
+    out["interpretation"] = (
+        "candidate_structure_only: compare against shuffled-token null and report "
+        "factor-combination coverage"
+    )
     return out
+
+
+def shuffle_tokens(records, seed=0):
+    """Shuffle token sequences across records while preserving factors/history size."""
+    rng = random.Random(seed)
+    tokens = [r["tokens"] for r in records]
+    rng.shuffle(tokens)
+    return [{**record, "tokens": token} for record, token in zip(records, tokens)]
+
+
+def stratified_probe(records, vocab, split_key="split"):
+    """Probe each declared split independently and expose factor coverage."""
+    groups = defaultdict(list)
+    for record in records:
+        groups[record.get(split_key, "unspecified")].append(record)
+    result = {}
+    for name, group in groups.items():
+        factors = sorted(group[0]["factors"])
+        combinations = sorted({tuple(r["factors"][f] for f in factors) for r in group})
+        result[name] = {"probe": probe(group, vocab),
+                        "factor_combinations": combinations,
+                        "n": len(group)}
+    return result
