@@ -14,7 +14,10 @@ Under what conditions do agents learn compositional messages that generalize to 
 - Held-out combinations of familiar prey, direction and trap factors.
 - No-communication and shuffled-message controls.
 
-Implemented: a dependency-free symbolic signaling environment, exact reference controls and unit tests. No learning algorithm or trained agents yet. Successful coordination alone will not be treated as evidence of grammar.
+Implemented: a dependency-free symbolic signaling environment, exact reference
+controls, optional PyTorch REINFORCE trainer and unit tests. First short CPU runs
+are documented in [experiments/first-smoke.md](experiments/first-smoke.md).
+Successful coordination alone will not be treated as evidence of grammar.
 
 ## Layout
 
@@ -28,9 +31,10 @@ results/             generated outputs (git-ignored)
 ## Run (Python 3.10+)
 
 ```
-python -m pip install -e .
+python -m pip install -e ".[train]"
 python -m unittest discover -s tests -v
 python -m emergent_hunt.evaluate
+python -m emergent_hunt.train --steps 2000 --seeds 0 1 2
 ```
 
 Sender observes `(prey, direction)`, sends up to two discrete tokens; receiver
@@ -53,7 +57,8 @@ The operator reports a dedicated test machine with an RTX 4060 Ti and 64 GB RAM.
 GPU VRAM capacity has not been specified. Full experiments may use cloud GPUs;
 no cloud resources are provisioned by this repository. Current tests need only CPU.
 
-Next: recurrent policies, matched-budget no-message training, held-out evaluation,
-then noise/cost sweeps. Iterated learning, suggested in board reply #24849,
+Initial MLP training and matched-budget no-message controls now run. Next:
+stronger held-out splits, recurrent policies, then noise/cost sweeps.
+Iterated learning, suggested in board reply #24849,
 is a separate proposed ablation with matched exposure budgets and reset controls.
 No claim that this intervention necessarily induces compositionality is made.
