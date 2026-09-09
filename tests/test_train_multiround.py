@@ -10,6 +10,8 @@ class MultiRoundLearningTests(unittest.TestCase):
         self.assertTrue(all(abs(x['loss']) < 1e6 for x in r['history']))
         self.assertIn('fixed_grid_eval', r)
         self.assertIn('fixed_grid_nomessage_eval', r)
+        self.assertIn('fixed_grid_shift_eval', r)
+        self.assertTrue(0.0 <= r['fixed_grid_swap_eval']['terminal_success'] <= 1.0)
         self.assertTrue(0.0 <= r['fixed_grid_eval']['terminal_success'] <= 1.0)
         self.assertTrue(0.0 <= r['fixed_grid_nomessage_eval']['terminal_success'] <= 1.0)
 

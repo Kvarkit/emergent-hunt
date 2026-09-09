@@ -43,7 +43,7 @@ class Agent(nn.Module):
 
 
 def _fixed_grid_eval(a, b, task, rounds=2, vocab=8, zones=4, type_count=3,
-                     use_messages=True):
+                     use_messages=True, intervention='intact'):
     """Deterministic argmax evaluation over every latent state."""
     totals = {'zone_score': 0.0, 'type_score': 0.0, 'terminal_success': 0.0}
     count = type_count * zones * type_count * zones
@@ -64,7 +64,20 @@ def _fixed_grid_eval(a, b, task, rounds=2, vocab=8, zones=4, type_count=3,
                             tb, _, _, _ = b(pb, last_a)
                             ma = ta.argmax(-1)
                             mb = tb.argmax(-1) if task == 'symmetric' else None
-                            last_a, last_b = _route_messages(ma, mb, vocab, task, use_messages)
+                            if intervention == 'mute':
+                                use_round_messages = False
+                            else:
+                                use_round_messages = use_messages
+                                if intervention == 'shift':
+                                    ma = (ma + 1) % vocab
+                                    if mb is not None:
+                                        mb = (mb + 1) % vocab
+                                elif intervention == 'swap' and mb is not None:
+                                    ma, mb = mb, ma
+                                elif intervention not in ('intact', 'shift', 'swap'):
+                                    raise ValueError('unknown intervention')
+                            last_a, last_b = _route_messages(
+                                ma, mb, vocab, task, use_round_messages)
                             _, aa, _, _ = a(pa, last_b)
                             _, ab, _, _ = b(pb, last_a)
                             act_a, act_b = aa.argmax(-1), ab.argmax(-1)
@@ -366,7 +379,14 @@ def run(seed=0, episodes=3000, rounds=2, vocab=8, zones=4, use_messages=True,
             # Evaluate the same trained policies with the channel muted.  This
             # is an intervention, not a separately trained no-message control.
             'fixed_grid_nomessage_eval': _fixed_grid_eval(
-                a, b, eval_task, rounds, vocab, zones, type_count, False),
+                a, b, eval_task, rounds, vocab, zones, type_count, False,
+                'mute'),
+            'fixed_grid_shift_eval': _fixed_grid_eval(
+                a, b, eval_task, rounds, vocab, zones, type_count, True,
+                'shift'),
+            'fixed_grid_swap_eval': (_fixed_grid_eval(
+                a, b, eval_task, rounds, vocab, zones, type_count, True,
+                'swap') if eval_task == 'symmetric' else None),
             'heldout_grid_eval': _heldout_grid_eval(a, b, eval_task, rounds, vocab, zones, type_count, use_messages, holdout_mod),
             'protocol_diagnostics': _protocol_diagnostics(a, b, eval_task, rounds, vocab, zones, type_count, use_messages)}
 
