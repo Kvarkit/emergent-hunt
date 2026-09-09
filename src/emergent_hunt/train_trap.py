@@ -192,6 +192,7 @@ def evaluate(driver, preparer, encoder, env, corpus, mode='communication'):
     result = {}
     for condition in ('intact', 'mute'):
         caught = prepared = prey = reward = success = 0
+        first_guess = in_position = 0
         for task in corpus:
             run_mode = mode if condition == 'intact' else 'no_message'
             out = rollout(env, driver, preparer, encoder, task=task,
@@ -204,16 +205,27 @@ def evaluate(driver, preparer, encoder, env, corpus, mode='communication'):
             prepared += sum(1 for t in task.targets
                             if env.prepared_methods[t.zone] == mechanism_for(
                                 t.prey_type, env.mechanisms))
+            # The one-shot preparation payment is the message-sensitive
+            # statistic: correct_prep_rate below only reads the trap's FINAL
+            # mechanism, which a blind preparer can also set by trying every
+            # mechanism in turn. first_guess_rate counts the prey whose trap was
+            # right on the single attempt that could pay, so a blind preparer
+            # is pinned at 1/mechanisms.
+            first_guess += info['totals']['prepare'] / env.partial if env.partial else 0
+            in_position += sum(1 for step in out['trace']
+                               for name, _ in step['events'] if name == 'in_position')
         result[condition] = {'catch_rate': caught / prey,
+                             'first_guess_rate': first_guess / prey,
                              'correct_prep_rate': prepared / prey,
+                             'in_position_rate': in_position / prey,
                              'mean_reward': reward / len(corpus),
                              'all_caught_rate': success / len(corpus)}
     return result
 
 
 def run(seed=0, mode='communication', episodes=20000, batch=16, n=3, targets=1,
-        by='pair', horizon=8, window=1, patience=4, stop_when_resolved=False,
-        gamma=.97, lr=3e-3, entropy_coef=.02,
+        by='pair', horizon=8, window=1, patience=4, approach=0.0,
+        stop_when_resolved=False, gamma=.97, lr=3e-3, entropy_coef=.02,
         report_every=2000, checkpoint=None, on_report=None):
     """Defaults matter here and are not arbitrary.
 
@@ -234,7 +246,7 @@ def run(seed=0, mode='communication', episodes=20000, batch=16, n=3, targets=1,
     torch.set_num_threads(1)
     env = TrapPrepHunt(n=n, targets=targets, split='train', by=by, seed=seed,
                        horizon=horizon, window=window, patience=patience,
-                       stop_when_resolved=stop_when_resolved)
+                       approach=approach, stop_when_resolved=stop_when_resolved)
     encoder = TrapEncoder(env)
     driver, preparer = TrapDriver(encoder), TrapPreparer(encoder)
     parameters = list(driver.parameters()) + list(preparer.parameters())
@@ -283,18 +295,23 @@ def run(seed=0, mode='communication', episodes=20000, batch=16, n=3, targets=1,
         Path(checkpoint).parent.mkdir(parents=True, exist_ok=True)
         torch.save({'driver': driver.state_dict(), 'preparer': preparer.state_dict(),
                     'config': {'seed': seed, 'mode': mode, 'n': n, 'targets': targets,
-                               'by': by, 'horizon': horizon, 'window': window}},
+                               'by': by, 'horizon': horizon, 'window': window,
+                               'patience': patience, 'approach': approach}},
                    checkpoint)
     return {'seed': seed, 'mode': mode, 'episodes': episodes, 'batch': batch,
             'n': n, 'targets': targets, 'by': by, 'horizon': horizon,
-            'window': window, 'patience': patience,
+            'window': window, 'patience': patience, 'approach': approach,
             'stop_when_resolved': stop_when_resolved,
             'gamma': gamma, 'lr': lr,
             'entropy_coef': entropy_coef, 'torch': torch.__version__,
             'seconds': time.perf_counter() - start,
+            # The bound must be the one for the configuration actually run: it
+            # depends on the horizon, the prey's patience AND the firing window,
+            # since a wider window postpones the last useful activation for a
+            # blind sweeper exactly as much as it does for the learners.
             'blind_bound': {split: blind_reference(
                 n=n, split=split, by=by, horizon=horizon,
-                patience=patience)['optimal_blind_success']
+                patience=patience, window=window)['optimal_blind_success']
                 for split in ('train', 'test')} if targets == 1 else None,
             'initial': initial, 'history': history,
             'agents': (driver, preparer, encoder, env)}
@@ -354,6 +371,10 @@ def main():
     parser.add_argument('--by', choices=['triple', 'pair'], default='pair')
     parser.add_argument('--horizon', type=int, default=8)
     parser.add_argument('--patience', type=int, default=4)
+    parser.add_argument('--window', type=int, default=1)
+    parser.add_argument('--approach', type=float, default=0.0,
+                        help='shaping reward for a prey standing on a correctly '
+                             'armed trap, deducted from the catch reward')
     parser.add_argument('--probe', action='store_true',
                         help='run trap_probe.selectivity on the learned pair')
     parser.add_argument('--output', default='results/trap-smoke.json')
@@ -366,7 +387,8 @@ def main():
             checkpoint = target.with_name(f'{target.stem}-{seed}-{mode}.pt')
             result = run(seed=seed, mode=mode, episodes=args.episodes,
                          targets=args.targets, by=args.by, horizon=args.horizon,
-                         patience=args.patience, checkpoint=checkpoint)
+                         patience=args.patience, window=args.window,
+                         approach=args.approach, checkpoint=checkpoint)
             driver, preparer, encoder, env = result.pop('agents')
             if args.probe and mode == 'communication':
                 from .trap_probe import selectivity
@@ -376,6 +398,8 @@ def main():
                                        split=split, max_tasks=24,
                                        env_kwargs={'horizon': args.horizon,
                                                    'patience': args.patience,
+                                                   'window': args.window,
+                                                   'approach': args.approach,
                                                    'stop_when_resolved': False})
                     for split in ('train', 'test')}
             results.append(result)

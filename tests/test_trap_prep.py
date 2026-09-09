@@ -98,13 +98,50 @@ class RewardSchemeTests(unittest.TestCase):
         self.assertEqual(rewards[2:], [0.0, 0.0])
         self.assertAlmostEqual(steps[-1][2]['totals']['prepare'], .25)
 
-    def test_wrong_then_corrected_preparation_pays_once(self):
+    def test_a_wrong_first_guess_forfeits_the_partial_reward(self):
+        # Preparation is a one-shot commitment: only the first attempt at a trap
+        # can pay. Otherwise cycling through every mechanism collects the partial
+        # reward with certainty and it stops being evidence of communication.
         wrong = (self.mechanism + 1) % 3
         steps = script(self.env, self.task,
                        [MOVE_RIGHT, prepare_action(wrong),
                         prepare_action(self.mechanism), prepare_action(wrong),
                         prepare_action(self.mechanism)])
-        self.assertEqual([round(r, 5) for r, _, _ in steps], [0.0, 0.0, .25, 0.0, 0.0])
+        self.assertEqual([round(r, 5) for r, _, _ in steps], [0.0, 0.0, 0.0, 0.0, 0.0])
+
+    def test_a_corrected_mechanism_still_arms_the_trap_for_a_catch(self):
+        # The payment is one-shot, the trap's state is not: fixing a bad guess
+        # still allows a catch, so the message-blind catch bound is untouched.
+        task = TrapTask((Target(zone=0, prey_type=0, start_distance=1),))
+        env = TrapPrepHunt(targets=1, split='all')
+        mechanism = mechanism_for(0, 3)
+        wrong = (mechanism + 1) % 3
+        steps = script(env, task, [prepare_action(wrong),
+                                   prepare_action(mechanism), ACTIVATE],
+                       driver=[HOLD, HOLD, drive_action(0)])
+        self.assertEqual(steps[-1][2]['caught'], 1)
+        self.assertAlmostEqual(steps[-1][2]['totals']['prepare'], 0.0)
+
+    def test_approach_shaping_is_off_by_default_and_conserves_the_total(self):
+        self.assertEqual(TrapPrepHunt(targets=1, split='all').approach, 0.0)
+        result = oracle_rollout(self.task, approach=.25)
+        self.assertTrue(result['success'])
+        self.assertAlmostEqual(result['total_reward'], 1.0)
+        self.assertAlmostEqual(result['totals']['prepare'], .25)
+        self.assertAlmostEqual(result['totals']['approach'], .25)
+        self.assertAlmostEqual(result['totals']['catch'], .5)
+
+    def test_approach_needs_the_right_method_under_the_arriving_prey(self):
+        # The shaping term is not "the prey arrived": it is "the prey arrived on
+        # a charged trap already carrying the mechanism its type requires", so a
+        # blind guess earns it only 1/mechanisms of the time.
+        task = TrapTask((Target(zone=0, prey_type=0, start_distance=1),))
+        wrong = (mechanism_for(0, 3) + 1) % 3
+        for mechanism, expected in ((mechanism_for(0, 3), .25), (wrong, 0.0)):
+            env = TrapPrepHunt(targets=1, split='all', approach=.25)
+            steps = script(env, task, [prepare_action(mechanism), WAIT],
+                           driver=[HOLD, drive_action(0)])
+            self.assertAlmostEqual(steps[-1][2]['totals']['approach'], expected)
 
     def test_preparation_away_from_a_target_pays_nothing(self):
         # Zone 0 holds a trap but no prey: preparing it is not "correct
@@ -380,6 +417,31 @@ class BlindControlTests(unittest.TestCase):
                   for h in range(4, 12)]
         self.assertEqual(values, sorted(values))
         self.assertAlmostEqual(values[0], 1 / 9)
+
+    def test_a_wider_firing_window_loosens_the_bound_like_more_patience(self):
+        # A prey must arrive by `patience` but stays catchable for `window`
+        # steps, so the last useful activation is at patience + window - 1. The
+        # window is not free slack: it must enter the bound.
+        for patience, window in ((4, 2), (3, 3), (5, 1)):
+            self.assertAlmostEqual(
+                blind_reference(split='all', by='pair', horizon=12,
+                                patience=patience, window=window)['optimal_blind_success'],
+                blind_reference(split='all', by='pair', horizon=12,
+                                patience=5)['optimal_blind_success'],
+                msg=(patience, window))
+        # And the deadline-4 regime is reproduced by patience=3, window=2.
+        self.assertAlmostEqual(
+            blind_reference(split='all', by='pair', horizon=8, patience=3,
+                            window=2)['optimal_blind_success'], 1 / 9)
+
+    def test_the_windowed_bound_agrees_with_brute_force(self):
+        kwargs = dict(n=2, targets=1, mechanisms=2, horizon=4, window=2,
+                      patience=2, by='pair', stop_when_resolved=False)
+        searched = blind_search(env_kwargs=kwargs)
+        analytic = blind_reference(n=2, split='all', by='pair', horizon=4,
+                                   mechanisms=2, patience=2, window=2)
+        self.assertAlmostEqual(searched['optimal_blind_catch_rate'],
+                               analytic['optimal_blind_success'])
 
     def test_reference_agrees_with_brute_force_through_the_simulator(self):
         # Small enough to enumerate every fixed preparer sequence and every
