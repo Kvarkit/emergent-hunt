@@ -27,9 +27,18 @@ Controls, at matched episode budget:
   no_readiness   -- the preparer->driver wire is zeroed: the driver must time
                     the arrival without hearing that the trap is ready.
 
+Report two rates against two different bounds, because they fail differently.
+`first_guess_rate` (the one-shot preparation payment) is bounded for a blind
+preparer by trap_prep.blind_preparation_bound, and `catch_rate` by
+trap_prep.blind_reference; `correct_prep_rate` is kept only for continuity with
+the first sweep and should not be read as evidence of anything, since it reports
+the trap's FINAL mechanism and a blind preparer can set that by trying every
+mechanism in turn.
+
 No claim of emergent grammar is made from anything here. Catch rate is reported
 against trap_prep.blind_reference and the split-matched held-out corpus, and
-the learned pair is handed to trap_probe.selectivity for a token-level readout.
+the learned pair is handed to trap_probe.selectivity for a token-level readout
+and to trap_diagnose for the stage-by-stage and bits-on-the-wire readout.
 """
 import argparse
 import json
