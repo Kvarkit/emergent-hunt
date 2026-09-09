@@ -6,7 +6,8 @@ from .line_policy import line_observation
 
 
 def rollout_episode(agent_a, agent_b, goal_pos, trap_pos, length=5, horizon=8,
-                    vocab=8, use_messages=True, crossed=False):
+                    vocab=8, use_messages=True, crossed=False,
+                    message_mode="actual"):
     """Collect a complete deterministic (argmax) episode without state leaks."""
     env = LineHunt(length, horizon, crossed=crossed)
     env.reset(goal_pos, trap_pos)
@@ -30,10 +31,16 @@ def rollout_episode(agent_a, agent_b, goal_pos, trap_pos, length=5, horizon=8,
                         "relative_gap": trap_pos - goal_pos},
             "observations": {"a": oa.tolist()[0], "b": ob.tolist()[0]},
         })
-        if use_messages:
+        if not use_messages or message_mode == "zero":
+            incoming_a = incoming_b = None
+        elif message_mode == "block_a_to_b":
+            incoming_a, incoming_b = token_b, None
+        elif message_mode == "block_b_to_a":
+            incoming_a, incoming_b = None, token_a
+        elif message_mode == "actual":
             incoming_a, incoming_b = token_b, token_a
         else:
-            incoming_a = incoming_b = None
+            raise ValueError("unknown message_mode")
         _, reward, done, info = env.step(action_a, action_b)
         trace[-1].update({"reward": reward, "done": done, "info": info})
         if done:
@@ -42,7 +49,7 @@ def rollout_episode(agent_a, agent_b, goal_pos, trap_pos, length=5, horizon=8,
 
 
 def collect_grid(agent_a, agent_b, length=5, horizon=8, vocab=8,
-                 use_messages=True, crossed=False):
+                 use_messages=True, crossed=False, message_mode="actual"):
     """Collect trajectories for all distinct goal/trap positions."""
     records = []
     for goal in range(length):
@@ -50,7 +57,8 @@ def collect_grid(agent_a, agent_b, length=5, horizon=8, vocab=8,
             if goal == trap:
                 continue
             records.extend(rollout_episode(agent_a, agent_b, goal, trap,
-                                            length, horizon, vocab, use_messages, crossed))
+                                            length, horizon, vocab, use_messages, crossed,
+                                            message_mode))
     return records
 
 

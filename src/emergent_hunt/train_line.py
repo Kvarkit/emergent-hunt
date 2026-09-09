@@ -14,7 +14,7 @@ from .line_rollout import rollout_episode
 def train(seed=0, episodes=50000, length=5, horizon=8, vocab=8,
           hidden_dim=32, use_messages=True, crossed=False,
           critic=True, entropy_coef=0.01, canonical_bootstrap_episodes=0,
-          sender_aux=0.0):
+          sender_aux=0.0, lr=3e-3):
     random.seed(seed); torch.manual_seed(seed); torch.set_num_threads(1)
     a, b = GRULineAgent(vocab=vocab, hidden_dim=hidden_dim), GRULineAgent(vocab=vocab, hidden_dim=hidden_dim)
     value_a = torch.nn.Linear(hidden_dim, 1)
@@ -22,7 +22,7 @@ def train(seed=0, episodes=50000, length=5, horizon=8, vocab=8,
     params = list(a.parameters()) + list(b.parameters())
     if critic:
         params += list(value_a.parameters()) + list(value_b.parameters())
-    opt = torch.optim.Adam(params, lr=3e-3)
+    opt = torch.optim.Adam(params, lr=lr)
     history = []
     for ep in range(1, episodes + 1):
         goal, trap = random.sample(range(length), 2)
@@ -91,6 +91,7 @@ def train(seed=0, episodes=50000, length=5, horizon=8, vocab=8,
             "critic": critic, "entropy_coef": entropy_coef,
             "canonical_bootstrap_episodes": canonical_bootstrap_episodes,
             "sender_aux": sender_aux,
+            "lr": lr,
             "agents": (a, b)}
 
 

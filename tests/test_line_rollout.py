@@ -29,6 +29,12 @@ class LineRolloutTests(unittest.TestCase):
                 env, _ = canonical_crossed_rollout(goal, trap)
                 self.assertTrue(env.state.success, (goal, trap))
 
+    def test_direction_ablation_modes_are_valid(self):
+        a, b = GRULineAgent(), GRULineAgent()
+        for mode in ("actual", "zero", "block_a_to_b", "block_b_to_a"):
+            trace = rollout_episode(a, b, 1, 3, message_mode=mode)
+            self.assertGreater(len(trace), 0)
+
 
 if __name__ == '__main__':
     unittest.main()

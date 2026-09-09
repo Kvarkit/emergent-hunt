@@ -49,6 +49,10 @@ class LinePolicyTests(unittest.TestCase):
         a, b = train_canonical_control(seed=0, episodes=3, horizon=2)
         self.assertEqual(a.vocab, b.vocab)
 
+    def test_learning_rate_is_recorded(self):
+        result = train(seed=0, episodes=2, lr=1e-3)
+        self.assertEqual(result['lr'], 1e-3)
+
 
 if __name__ == "__main__":
     unittest.main()
