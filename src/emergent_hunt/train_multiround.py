@@ -363,6 +363,10 @@ def run(seed=0, episodes=3000, rounds=2, vocab=8, zones=4, use_messages=True,
             'action_aux': action_aux,
             'seconds':time.perf_counter()-start,'history':records,
             'fixed_grid_eval': _fixed_grid_eval(a, b, eval_task, rounds, vocab, zones, type_count, use_messages),
+            # Evaluate the same trained policies with the channel muted.  This
+            # is an intervention, not a separately trained no-message control.
+            'fixed_grid_nomessage_eval': _fixed_grid_eval(
+                a, b, eval_task, rounds, vocab, zones, type_count, False),
             'heldout_grid_eval': _heldout_grid_eval(a, b, eval_task, rounds, vocab, zones, type_count, use_messages, holdout_mod),
             'protocol_diagnostics': _protocol_diagnostics(a, b, eval_task, rounds, vocab, zones, type_count, use_messages)}
 

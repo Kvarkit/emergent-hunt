@@ -9,7 +9,9 @@ class MultiRoundLearningTests(unittest.TestCase):
         self.assertEqual(r['episodes'], 20)
         self.assertTrue(all(abs(x['loss']) < 1e6 for x in r['history']))
         self.assertIn('fixed_grid_eval', r)
+        self.assertIn('fixed_grid_nomessage_eval', r)
         self.assertTrue(0.0 <= r['fixed_grid_eval']['terminal_success'] <= 1.0)
+        self.assertTrue(0.0 <= r['fixed_grid_nomessage_eval']['terminal_success'] <= 1.0)
 
     def test_one_way_small_grid_and_curriculum(self):
         r = run(seed=0, episodes=20, rounds=1, zones=2, type_count=2,
