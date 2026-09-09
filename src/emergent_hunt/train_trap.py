@@ -42,7 +42,8 @@ from torch.distributions import Categorical
 from torch.nn.functional import one_hot
 
 from .trap_prep import (ACTIVE, CAUGHT, DRIVE_BASE, PREPARE_BASE, TrapPrepHunt,
-                        blind_reference, mechanism_for, tasks)
+                        blind_preparation_bound, blind_reference, mechanism_for,
+                        tasks)
 from .train import mlp
 
 MODES = ('communication', 'no_message', 'no_readiness')
@@ -224,21 +225,41 @@ def evaluate(driver, preparer, encoder, env, corpus, mode='communication'):
 
 
 def run(seed=0, mode='communication', episodes=20000, batch=16, n=3, targets=1,
-        by='pair', horizon=8, window=1, patience=4, approach=0.0,
+        by='pair', horizon=8, window=1, patience=4, approach=0.0, start_pos=0,
         stop_when_resolved=False, gamma=.97, lr=3e-3, entropy_coef=.02,
         report_every=2000, checkpoint=None, on_report=None):
     """Defaults matter here and are not arbitrary.
 
-    patience=4 (with n=3, horizon=8) is the regime in which the reference
-    protocol still solves every task while a message-blind sweep cannot reach a
-    second trap, so trap_prep.blind_reference is 1/9, 1/6, 1/3 rather than the
-    1/3, 1/2, 1.0 it would be with no deadline. Without it the by='pair' test
-    split is solvable blind and a high test catch rate would mean nothing.
+    patience=4 (with n=3) is the regime in which the reference protocol still
+    solves every task while a message-blind sweep cannot reach a second trap, so
+    trap_prep.blind_reference is 1/9, 1/6, 1/3 rather than the 1/3, 1/2, 1.0 it
+    would be with no deadline. Without it the by='pair' test split is solvable
+    blind and a high test catch rate would mean nothing.
 
     stop_when_resolved=False keeps the scene running after the prey is gone.
     Early termination is a trap for a learner: an untrained driver drives at
     once, the prey escapes on step two, and the preparer never gets enough
     steps to discover that preparing pays at all.
+
+    horizon=8 and start_pos=0 are kept as the historical defaults so the
+    published sweep stays reproducible, but the diagnosed regime for new runs is
+    horizon=4, start_pos=1, for two independent reasons:
+
+    * horizon > patience + window - 1 leaves steps on which nothing can be won.
+      They still emit four log-probability terms each, and per-episode advantage
+      normalization gives them a systematically negative advantage, so they are
+      not merely wasted -- they push probability mass away from whatever was
+      emitted there. Cutting them also removes a freebie: the partial reward
+      does not check the prey's status, so at horizon=8 a preparer could stroll
+      the whole line arming traps long after the prey had fled, which is exactly
+      what the first sweep learned to do. It also tightens the blind ceiling on
+      first_guess_rate from 1/2 to 1/3 on the train split.
+    * start_pos=1 (the middle of the line) leaves every bound untouched -- a
+      blind two-trap sweep still costs 5 steps from anywhere -- while cutting
+      the reference protocol's worst-case travel from 2 steps to 1. At
+      start_pos=0 the oracle's slack against the deadline is exactly zero on the
+      far zone, so learners had to hit a one-step firing window with no margin
+      at all. At start_pos=1 the minimum slack is 1.
     """
     if mode not in MODES:
         raise ValueError(f'mode must be one of {MODES}')
@@ -246,7 +267,8 @@ def run(seed=0, mode='communication', episodes=20000, batch=16, n=3, targets=1,
     torch.set_num_threads(1)
     env = TrapPrepHunt(n=n, targets=targets, split='train', by=by, seed=seed,
                        horizon=horizon, window=window, patience=patience,
-                       approach=approach, stop_when_resolved=stop_when_resolved)
+                       approach=approach, start_pos=start_pos,
+                       stop_when_resolved=stop_when_resolved)
     encoder = TrapEncoder(env)
     driver, preparer = TrapDriver(encoder), TrapPreparer(encoder)
     parameters = list(driver.parameters()) + list(preparer.parameters())
@@ -301,7 +323,7 @@ def run(seed=0, mode='communication', episodes=20000, batch=16, n=3, targets=1,
     return {'seed': seed, 'mode': mode, 'episodes': episodes, 'batch': batch,
             'n': n, 'targets': targets, 'by': by, 'horizon': horizon,
             'window': window, 'patience': patience, 'approach': approach,
-            'stop_when_resolved': stop_when_resolved,
+            'start_pos': start_pos, 'stop_when_resolved': stop_when_resolved,
             'gamma': gamma, 'lr': lr,
             'entropy_coef': entropy_coef, 'torch': torch.__version__,
             'seconds': time.perf_counter() - start,
@@ -310,8 +332,15 @@ def run(seed=0, mode='communication', episodes=20000, batch=16, n=3, targets=1,
             # since a wider window postpones the last useful activation for a
             # blind sweeper exactly as much as it does for the learners.
             'blind_bound': {split: blind_reference(
-                n=n, split=split, by=by, horizon=horizon,
+                n=n, split=split, by=by, horizon=horizon, start_pos=start_pos,
                 patience=patience, window=window)['optimal_blind_success']
+                for split in ('train', 'test')} if targets == 1 else None,
+            # first_guess_rate has its own, different ceiling: the partial
+            # reward ignores the prey's position, so a blind preparer is bounded
+            # by how many zones it can reach and guess at within the horizon.
+            'blind_preparation_bound': {split: blind_preparation_bound(
+                n=n, split=split, by=by, horizon=horizon,
+                start_pos=start_pos)['upper_bound_first_guess_rate']
                 for split in ('train', 'test')} if targets == 1 else None,
             'initial': initial, 'history': history,
             'agents': (driver, preparer, encoder, env)}
@@ -372,6 +401,7 @@ def main():
     parser.add_argument('--horizon', type=int, default=8)
     parser.add_argument('--patience', type=int, default=4)
     parser.add_argument('--window', type=int, default=1)
+    parser.add_argument('--start-pos', dest='start_pos', type=int, default=0)
     parser.add_argument('--approach', type=float, default=0.0,
                         help='shaping reward for a prey standing on a correctly '
                              'armed trap, deducted from the catch reward')
@@ -388,7 +418,8 @@ def main():
             result = run(seed=seed, mode=mode, episodes=args.episodes,
                          targets=args.targets, by=args.by, horizon=args.horizon,
                          patience=args.patience, window=args.window,
-                         approach=args.approach, checkpoint=checkpoint)
+                         approach=args.approach, start_pos=args.start_pos,
+                         checkpoint=checkpoint)
             driver, preparer, encoder, env = result.pop('agents')
             if args.probe and mode == 'communication':
                 from .trap_probe import selectivity
@@ -400,6 +431,7 @@ def main():
                                                    'patience': args.patience,
                                                    'window': args.window,
                                                    'approach': args.approach,
+                                                   'start_pos': args.start_pos,
                                                    'stop_when_resolved': False})
                     for split in ('train', 'test')}
             results.append(result)
@@ -408,7 +440,9 @@ def main():
                               'seconds': round(result['seconds'], 1),
                               'train': result['history'][-1]['train']['intact'],
                               'test': result['history'][-1]['test']['intact'],
-                              'blind_bound': result['blind_bound']}), flush=True)
+                              'blind_bound': result['blind_bound'],
+                              'blind_preparation_bound':
+                                  result['blind_preparation_bound']}), flush=True)
 
 
 if __name__ == '__main__':

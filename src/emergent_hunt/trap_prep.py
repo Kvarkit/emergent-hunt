@@ -709,6 +709,58 @@ def blind_upper_bound(n=3, targets=2, split='all', by='pair', horizon=16,
             'argmax_schedule_zone_mechanism_step': argmax}
 
 
+def blind_preparation_bound(n=3, split='all', by='pair', horizon=16,
+                            start_pos=0, mechanisms=None, task_list=None):
+    """Exact ceiling on the *partial preparation* reward for a message-blind
+    preparer, in prey per task -- the companion of `blind_reference`, which
+    bounds catches.
+
+    It exists because the partial reward, not the catch, is what a learner
+    actually climbs first, so it is the number a learned `first_guess_rate` has
+    to beat before any claim is made that the method was communicated.
+
+    Derivation. By the theorem in `blind_reference` a blind preparer is a fixed
+    action sequence, and since the payment is one-shot all that matters about
+    zone z is the mechanism of the FIRST preparation attempted there. The
+    payment ignores the prey's position and status, so the driver is irrelevant
+    and timing drops out entirely: a sequence is characterized by an ordered
+    subset of zones z_1..z_r with methods m_1..m_r, feasible iff walking
+    start -> z_1 -> ... -> z_r plus one step per preparation fits the horizon,
+
+        travel(start, z_1, ..., z_r) + r <= horizon.
+
+    Given a feasible zone set each zone's method is chosen independently, so the
+    optimum is the best feasible set of zones scored by its most common required
+    mechanism. Note the horizon enters only through how many zones are
+    reachable: at n=3 and horizon >= 5 every zone is coverable and the bound is
+    just "the commonest mechanism per zone", which on the by='pair' train split
+    is exactly 1/2.
+    """
+    corpus = tuple(task_list) if task_list is not None else tasks(n, 1, split, by)
+    mechanisms = n if mechanisms is None else mechanisms
+    prey = sum(len(task.targets) for task in corpus)
+    demands = Counter((t.zone, mechanism_for(t.prey_type, mechanisms))
+                      for task in corpus for t in task.targets)
+    per_zone = {z: max((demands[(z, m)] for m in range(mechanisms)), default=0)
+                for z in range(n)}
+    best, argmax = 0, ()
+    for length in range(0, n + 1):
+        for order in permutations(range(n), length):
+            travel, position = 0, start_pos
+            for zone in order:
+                travel += abs(position - zone)
+                position = zone
+            if travel + length > horizon:
+                continue
+            total = sum(per_zone[z] for z in order)
+            if total > best:
+                best, argmax = total, order
+    return {'split': split, 'by': by, 'tasks': len(corpus), 'prey': prey,
+            'horizon': horizon, 'exact': True,
+            'upper_bound_first_guess_rate': best / prey if prey else None,
+            'argmax_zone_order': argmax}
+
+
 def blind_search(env_kwargs=None, task_list=None):
     """Brute-force the same bound through the real simulator: maximize over all
     fixed preparer action sequences the mean, over tasks, of the best driver

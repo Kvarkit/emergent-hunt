@@ -1,10 +1,12 @@
 import unittest
+from itertools import product
 
 from emergent_hunt.environment import held_out_pairs
 from emergent_hunt.trap_prep import (ACTIVATE, ACTIVE, CAUGHT, ESCAPED, HOLD,
-                                     blind_upper_bound,
+                                     MOVE_LEFT, PREPARE_BASE, blind_upper_bound,
                                      MOVE_RIGHT, WAIT, Target, TrapPrepHunt,
-                                     TrapTask, blind_reference, blind_search,
+                                     TrapTask, blind_preparation_bound,
+                                     blind_reference, blind_search,
                                      drive_action, mechanism_for,
                                      oracle_rollout, prepare_action,
                                      reference_policies, run_episode, tasks)
@@ -503,6 +505,59 @@ class BlindControlTests(unittest.TestCase):
                   for d in (4, 5)}
         self.assertAlmostEqual(bounds[4], 1 / 9)
         self.assertAlmostEqual(bounds[5], 2 / 9)
+
+    def test_the_partial_reward_has_its_own_blind_ceiling(self):
+        # first_guess_rate is what a learner climbs before it ever sees a catch,
+        # so it needs a bound of its own. It is not the catch bound: the partial
+        # reward ignores the prey's position, so timing drops out and only how
+        # many zones fit in the horizon matters.
+        wide = blind_preparation_bound(split='train', by='pair', horizon=8)
+        self.assertAlmostEqual(wide['upper_bound_first_guess_rate'], 1 / 2)
+        self.assertAlmostEqual(
+            blind_preparation_bound(split='train', by='pair',
+                                    horizon=4)['upper_bound_first_guess_rate'], 1 / 3)
+        # Brute force over every fixed preparer sequence must agree.
+        for horizon in (2, 3, 4):
+            best = 0
+            for sequence in product(range(PREPARE_BASE + 3), repeat=horizon):
+                first, position = {}, 0
+                for action in sequence:
+                    if action in (MOVE_LEFT, MOVE_RIGHT):
+                        position = max(0, position - 1) if action == MOVE_LEFT \
+                            else min(2, position + 1)
+                    elif action >= PREPARE_BASE and position not in first:
+                        first[position] = action - PREPARE_BASE
+                corpus = tasks(3, 1, 'train', 'pair')
+                score = sum(first.get(t.zone) == mechanism_for(t.prey_type, 3)
+                            for task in corpus for t in task.targets)
+                best = max(best, score / len(corpus))
+            self.assertAlmostEqual(
+                best, blind_preparation_bound(split='train', by='pair',
+                                              horizon=horizon)['upper_bound_first_guess_rate'],
+                msg=horizon)
+
+    def test_starting_in_the_middle_buys_slack_without_moving_any_bound(self):
+        # The zero-slack knife edge is an artefact of starting at the end of the
+        # line, not a property of the deadline. A blind two-trap sweep costs 5
+        # steps from anywhere, so start_pos=1 leaves both bounds where they are
+        # while cutting the oracle's worst-case travel from 2 steps to 1.
+        for split in ('all', 'train', 'test'):
+            self.assertAlmostEqual(
+                blind_reference(split=split, by='pair', horizon=4, patience=4,
+                                start_pos=1)['optimal_blind_success'],
+                blind_reference(split=split, by='pair', horizon=4, patience=4,
+                                start_pos=0)['optimal_blind_success'], msg=split)
+        slack = {}
+        for start_pos in (0, 1):
+            steps = []
+            for task in tasks(targets=1, split='all'):
+                result = oracle_rollout(task, targets=1, horizon=4, patience=4,
+                                        start_pos=start_pos)
+                steps += [info['step'] for info in result['trace']
+                          if info['preparer_action'] == ACTIVATE]
+            slack[start_pos] = 4 - max(steps)
+        self.assertEqual(slack[0], 0, 'start_pos=0 leaves the oracle no margin')
+        self.assertEqual(slack[1], 1)
 
     def test_reference_protocol_beats_the_blind_bound_by_a_wide_margin(self):
         corpus = tasks(targets=1, split='test', by='pair')
