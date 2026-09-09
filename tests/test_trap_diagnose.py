@@ -7,7 +7,8 @@ import torch
 from emergent_hunt.trap_prep import (ACTIVATE, Target, TrapPrepHunt, TrapTask,
                                      mechanism_for, tasks)
 from emergent_hunt.trap_diagnose import (STAGES, _mutual_information, diagnose,
-                                         load, messages, stages)
+                                         load, messages, stages,
+                                         summarize_history)
 from emergent_hunt.train_trap import (TrapDriver, TrapEncoder, TrapPreparer, run)
 
 
@@ -125,6 +126,28 @@ class CheckpointTests(unittest.TestCase):
             self.assertEqual(loaded['settings']['patience'], 4)
             self.assertEqual(loaded['settings']['start_pos'], 0)
             self.assertEqual(loaded['settings']['approach'], 0.0)
+
+
+class HistoryTests(unittest.TestCase):
+    def test_a_transient_excursion_is_not_hidden_by_the_final_number(self):
+        result = {'mode': 'communication', 'seed': 0,
+                  'blind_bound': {'train': .2, 'test': .3},
+                  'history': [{'train': {'intact': {'catch_rate': v}}}
+                              for v in (.0, .5, .5, .5, .0)]}
+        summary = summarize_history(result)
+        self.assertEqual(summary['final'], .0)
+        self.assertEqual(summary['best'], .5)
+        self.assertEqual(summary['above_bound_evals'], 3)
+        self.assertEqual(summary['bound'], .2)
+
+    def test_first_guess_is_scored_against_the_preparation_bound(self):
+        result = {'mode': 'no_message', 'seed': 1, 'blind_bound': {'train': .2},
+                  'blind_preparation_bound': {'train': 1 / 3},
+                  'history': [{'train': {'intact': {'first_guess_rate': v}}}
+                              for v in (1 / 3, 1 / 3)]}
+        summary = summarize_history(result, key='first_guess_rate')
+        self.assertAlmostEqual(summary['bound'], 1 / 3)
+        self.assertEqual(summary['above_bound_evals'], 0)
 
 
 class MessageTests(unittest.TestCase):

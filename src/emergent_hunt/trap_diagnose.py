@@ -156,6 +156,31 @@ def messages(driver, preparer, encoder, env, corpus, mode='communication'):
                     ((z, k), (z, k)) for _, z, k in observed)}}
 
 
+def summarize_history(result, split='train', key='catch_rate', bound=None):
+    """Final vs best vs time-above-bound for one train_trap result.
+
+    The trainer reports the last evaluation and saves the last weights, which is
+    only the right summary if training converges. It does not: on the 200k-
+    episode run, seed 0 held a catch rate of 0.278 -- above the 0.167 blind
+    bound -- for forty thousand episodes and then fell back to 0.000, so the
+    final number alone says the opposite of what happened. `above_bound_evals`
+    is the honest middle ground: it says how long the excursion lasted, and it
+    is only worth reading next to the same figure for the no_message control,
+    since a peak picked out of a hundred evaluations is a selected maximum.
+    """
+    history = result['history']
+    if bound is None:
+        bound = (result.get('blind_bound') or {}).get(split) if key == 'catch_rate' \
+            else (result.get('blind_preparation_bound') or {}).get(split)
+    values = [row[split]['intact'][key] for row in history if key in row[split]['intact']]
+    above = [v for v in values if bound is not None and v > bound + 1e-9]
+    return {'mode': result['mode'], 'seed': result['seed'], 'split': split,
+            'key': key, 'bound': bound, 'evaluations': len(values),
+            'final': values[-1] if values else None,
+            'best': max(values) if values else None,
+            'above_bound_evals': len(above)}
+
+
 def diagnose(path, splits=('train', 'test'), **overrides):
     loaded = load(path, **overrides)
     env, encoder = loaded['env'], loaded['encoder']
@@ -172,12 +197,27 @@ def diagnose(path, splits=('train', 'test'), **overrides):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('checkpoint')
+    parser.add_argument('checkpoint',
+                        help='a .pt checkpoint, or a train_trap results .json '
+                             'with --history')
+    parser.add_argument('--history', action='store_true',
+                        help='summarize a results .json (final / best / how '
+                             'many evaluations cleared the matching bound) '
+                             'instead of replaying a checkpoint')
     parser.add_argument('--patience', type=int)
     parser.add_argument('--start-pos', dest='start_pos', type=int)
     parser.add_argument('--approach', type=float)
     parser.add_argument('--output')
     args = parser.parse_args()
+    if args.history:
+        from pathlib import Path
+        results = json.loads(Path(args.checkpoint).read_text(encoding='utf-8'))
+        report = [summarize_history(result, split, key)
+                  for result in results
+                  for split in ('train', 'test')
+                  for key in ('catch_rate', 'first_guess_rate')]
+        print(json.dumps(report, indent=2))
+        return
     overrides = {k: v for k, v in (('patience', args.patience),
                                    ('start_pos', args.start_pos),
                                    ('approach', args.approach)) if v is not None}
