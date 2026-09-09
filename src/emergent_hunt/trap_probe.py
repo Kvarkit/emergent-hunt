@@ -253,18 +253,29 @@ def selectivity(policy='compositional', corpus=None, n=3, targets=2,
     # Read the binding off the matrix; do not assume slot meanings in advance.
     best = {p: max(COMPONENTS, key=lambda c: positions[p]['exclusive'][c])
             for p in positions}
-    # Leakage, not raw diagonal mass, is the discriminating statistic: the
-    # task couples target->timing physically, but nothing couples a token to a
-    # component it does not encode, so a factorized code should put *zero* mass
-    # on off-diagonal exclusive effects while an entangled one cannot.
     leak = max(max(positions[p]['exclusive'][c] for c in COMPONENTS if c != best[p])
                for p in positions)
+    # Column concentration: of all the causal mass on component c, how much sits
+    # in a single token position. Raw diagonal mass is the wrong test here,
+    # because the task couples the components in one direction -- a trap can
+    # only be prepared or fired where the preparer stands, so retargeting can
+    # also cancel a firing or turn a prepare into a move, while re-methoding can
+    # never retarget. The `target` column is the one the physics does not
+    # muddy, and it is exactly what spec point 4 demands: only one part of the
+    # message may decide WHICH target is acted on. So the verdict rests on that
+    # column, and everything else is reported as a diagnostic.
+    concentration = {}
+    for component in COMPONENTS:
+        column = [positions[p]['changed'][component] for p in positions]
+        concentration[component] = max(column) / sum(column) if sum(column) else 0.0
+    timing_position = max(positions, key=lambda p: positions[p]['exclusive']['timing'])
     localized = (len(set(best.values())) == len(best)
                  # A position whose token never varies in the corpus has not been
                  # tested at all and must not count as evidence of a binding.
                  and all(positions[p]['counterfactuals'] > 0 for p in positions)
-                 and all(positions[p]['exclusive'][best[p]] >= min_effect for p in positions)
-                 and leak <= tolerance)
+                 and concentration['target'] >= 1 - tolerance
+                 and max(positions[p]['changed']['target'] for p in positions) >= min_effect
+                 and positions[timing_position]['exclusive']['timing'] >= min_effect)
     return {'protocol': 'EH-TRAP-INT-r0.1',
             'policy': policy if isinstance(policy, str) else 'custom',
             'n': n, 'targets': targets, 'by': by, 'split': split,
@@ -275,6 +286,7 @@ def selectivity(policy='compositional', corpus=None, n=3, targets=2,
                          'roll_1': persistent(roll(1))},
             'best_component_per_position': best,
             'exclusive_leakage': leak,
+            'column_concentration': concentration,
             'thresholds': {'min_effect': min_effect, 'tolerance': tolerance},
             'candidate_localized_binding': localized,
             'interpretation': 'causal localization only; not evidence of grammar '
