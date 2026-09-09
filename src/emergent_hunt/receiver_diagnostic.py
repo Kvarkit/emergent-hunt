@@ -128,3 +128,29 @@ def evaluate_staged(sender, receiver, length=5, horizon=8, constant_token=None):
                     if done: break
                 good += int(env.state.success)
     return good / (length*(length-1))
+
+
+def run_staged_grid(seeds=(0, 1, 2, 3, 4), episodes=1000, length=5,
+                    horizon=8):
+    """Run matched receiver/sender staging and frozen-channel controls.
+
+    The returned rows keep the receiver checkpoint fixed while comparing the
+    learned committed token with every constant token.  This makes the causal
+    communication gap reproducible without relying on sampled evaluation.
+    """
+    rows = []
+    for seed in seeds:
+        receiver = train_receiver(seed=seed, episodes=episodes,
+                                   length=length, horizon=horizon)
+        receiver_score = evaluate_receiver(receiver, length, horizon)
+        sender = train_sender_with_frozen_receiver(
+            receiver, seed=seed, episodes=episodes, length=length,
+            horizon=horizon)
+        actual = evaluate_staged(sender, receiver, length, horizon)
+        controls = [evaluate_staged(sender, receiver, length, horizon, k)
+                    for k in range(length)]
+        rows.append({'seed': seed, 'receiver': receiver_score,
+                     'actual': actual, 'constant_controls': controls,
+                     'control_mean': sum(controls) / len(controls),
+                     'causal_gap': actual - sum(controls) / len(controls)})
+    return rows

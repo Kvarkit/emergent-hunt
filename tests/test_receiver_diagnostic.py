@@ -3,7 +3,8 @@ import torch
 from emergent_hunt.line_policy import GRULineAgent
 from emergent_hunt.receiver_diagnostic import (evaluate_receiver, evaluate_staged,
                                                 train_receiver,
-                                                train_sender_with_frozen_receiver)
+                                                train_sender_with_frozen_receiver,
+                                                run_staged_grid)
 
 
 class ReceiverDiagnosticTests(unittest.TestCase):
@@ -48,6 +49,14 @@ class ReceiverDiagnosticTests(unittest.TestCase):
         receiver = train_receiver(seed=0, episodes=5, horizon=4)
         sender = train_sender_with_frozen_receiver(receiver, seed=0, episodes=5, horizon=4)
         self.assertTrue(0.0 <= evaluate_staged(sender, receiver, horizon=4) <= 1.0)
+
+    def test_grid_is_matched_and_reports_causal_gap(self):
+        rows = run_staged_grid(seeds=(0,), episodes=5, horizon=4)
+        self.assertEqual(len(rows), 1)
+        row = rows[0]
+        self.assertEqual(len(row['constant_controls']), 5)
+        self.assertAlmostEqual(row['causal_gap'],
+                               row['actual'] - row['control_mean'])
 
 
 if __name__ == '__main__': unittest.main()
