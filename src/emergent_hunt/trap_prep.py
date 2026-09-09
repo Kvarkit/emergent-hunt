@@ -38,7 +38,16 @@ Splits follow environment.py: `by='pair'` withholds whole (prey_type, zone)
 combinations -- exactly the two things the sender must transmit -- so a lookup
 table keyed on that pair cannot cover the test split, while `by='triple'` is the
 easy split in which every such pair still recurs in train.
+
+WARNING about that test split, found by tightening the blind bound: it withholds
+the pairs with (prey_type + zone) % n == 0, which leaves exactly ONE prey type
+per zone in test. A message-blind preparer that hardcodes the right method per
+zone and sweeps the line therefore solves it completely -- if it has time. So a
+catch rate on the held-out split is only meaningful under a deadline that makes
+sweeping impossible: give the prey a finite `patience` (n=3 wants patience=4)
+and always report trap_prep.blind_reference for the exact configuration used.
 """
+from collections import Counter
 from dataclasses import dataclass
 from itertools import permutations, product
 import random
@@ -145,7 +154,7 @@ class TrapPrepHunt:
                  mechanisms=None, horizon=16, window=1, vocabulary=8,
                  driver_message_length=3, preparer_message_length=1,
                  erasure=0.0, message_cost=0.0, move_cost=0.0, partial=0.25,
-                 start_pos=0):
+                 start_pos=0, patience=None, stop_when_resolved=True):
         self._tasks = tasks(n, targets, split, by)
         mechanisms = n if mechanisms is None else mechanisms
         if type(mechanisms) is not int or mechanisms < 1:
@@ -168,19 +177,28 @@ class TrapPrepHunt:
             raise ValueError('partial must be in [0, 1]')
         if not 0 <= start_pos < n:
             raise ValueError('start_pos outside the line')
+        if patience is not None and (type(patience) is not int or patience < 1):
+            raise ValueError('patience must be None or a positive integer')
         self.n, self.targets, self.mechanisms = n, targets, mechanisms
         self.horizon, self.window, self.partial = horizon, window, partial
         self.vocabulary = vocabulary
         self.driver_message_length = driver_message_length
         self.preparer_message_length = preparer_message_length
         self.erasure, self.message_cost, self.move_cost = erasure, message_cost, move_cost
-        self.start_pos = start_pos
+        self.start_pos, self.patience = start_pos, patience
+        self.stop_when_resolved = stop_when_resolved
         # Channel noise must not perturb the sampled task sequence.
         self._world_rng = random.Random(seed)
         self._channel_rng = random.Random(seed + 1)
         self._phase = 'done'
 
     # -- observation contract -------------------------------------------------
+
+    @property
+    def prepared_methods(self):
+        """Diagnostic view of every trap's prepared mechanism (-1 = unprepared).
+        Not an observation: neither agent ever sees the whole vector."""
+        return tuple(self._prepared)
 
     @property
     def step_index(self):
@@ -193,6 +211,7 @@ class TrapPrepHunt:
                 'zone': tuple(t.zone for t in self.task.targets),
                 'distance': tuple(self._distance),
                 'window_left': tuple(self._window_left),
+                'patience_left': tuple(self._patience_left),
                 'status': tuple(self._status)}
 
     def preparer_observation(self):
@@ -222,6 +241,10 @@ class TrapPrepHunt:
         self._paid = [False] * self.n
         self._distance = [t.start_distance for t in task.targets]
         self._window_left = [0] * self.targets
+        # patience=None means "no deadline beyond the horizon", so the counter
+        # is initialized to the horizon and never bites before the episode ends.
+        deadline = self.horizon if self.patience is None else self.patience
+        self._patience_left = [deadline] * self.targets
         self._status = [ACTIVE] * self.targets
         self._totals = {'prepare': 0.0, 'catch': 0.0, 'move_cost': 0.0,
                         'message_cost': 0.0, 'reward': 0.0}
@@ -341,20 +364,32 @@ class TrapPrepHunt:
                     self._step_events.append(('wasted_charge', zone))
         self._preparer_action = action
 
-        # End of timestep: prey that arrived and were not caught run their window down.
+        # End of timestep: prey that arrived and were not caught run their window
+        # down; every prey also runs down its own patience and flees when it
+        # expires. Patience is what stops the driver from stalling indefinitely
+        # while a message-blind preparer sweeps and fires every trap in turn --
+        # see blind_upper_bound, where it caps the schedule.
         for j in range(self.targets):
-            if self._status[j] == ACTIVE and self._distance[j] == 0:
+            if self._status[j] != ACTIVE:
+                continue
+            if self._distance[j] == 0:
                 self._window_left[j] -= 1
                 if self._window_left[j] <= 0:
                     self._status[j] = ESCAPED
                     self._step_events.append(('escaped', j))
+                    continue
+            self._patience_left[j] -= 1
+            if self._patience_left[j] <= 0:
+                self._status[j] = ESCAPED
+                self._step_events.append(('fled', j))
         for key in ('prepare', 'catch'):
             self._totals[key] += components[key]
         for key in ('move_cost', 'message_cost'):
             self._totals[key] += components[key]
         self._totals['reward'] += reward
         self._events.extend(self._step_events)
-        done = self._step >= self.horizon or all(s != ACTIVE for s in self._status)
+        done = self._step >= self.horizon or (
+            self.stop_when_resolved and all(s != ACTIVE for s in self._status))
         info = {'step': self._step,
                 'events': tuple(self._step_events),
                 'components': components,
@@ -424,7 +459,17 @@ class ReferenceDriver:
 class ReferencePreparer:
     """Reach the announced zone, prepare the announced method, report readiness,
     activate on the cue. Reads slots positionally; the meanings are the
-    driver's, not the environment's."""
+    driver's, not the environment's.
+
+    Readiness is *predictive*: it reports READY as soon as it is standing on the
+    announced charged trap, because its own action this step will arm it. A
+    retrospective "the trap is armed" reply would cost one extra step per
+    target, since the driver's message goes out before it hears the reply. That
+    step is not free -- it raises the shortest solvable horizon, and the horizon
+    is exactly what decides how many traps a message-blind sweeper can fire (see
+    blind_upper_bound), so the lag would inflate the control it is measured
+    against.
+    """
 
     def __init__(self, n=3, mechanisms=3):
         self.n, self.mechanisms = n, mechanisms
@@ -436,7 +481,6 @@ class ReferencePreparer:
         self._incoming = incoming
         zone, method, _ = self._decode(incoming)
         ready = (zone is not None and observation['self_pos'] == zone
-                 and observation['trap_method'] == method
                  and observation['trap_charged'])
         return (READY if ready else NOT_READY,)
 
@@ -500,43 +544,118 @@ def oracle_rollout(task, **kwargs):
 # -- exact message-blind control ----------------------------------------------
 
 def blind_reference(n=3, split='all', by='pair', horizon=16, start_pos=0,
-                    mechanisms=None):
+                    mechanisms=None, patience=None):
     """Exact optimal catch rate for a single-target preparer that hears nothing.
 
     Theorem. Every zone holds a trap and the preparer never observes the prey,
     so its observation stream (self_pos, trap_method, trap_charged, clock) is a
     deterministic function of its own past actions. A message-blind preparer is
-    therefore equivalent to a fixed action sequence, and the only thing that
-    sequence can do is stand on some zone z with method m prepared and activate
-    at some step k. Give the *driver* full knowledge of the task and of that
-    sequence -- an upper bound, since the driver can delay but never hasten an
-    arrival -- and the prey arrives exactly at step k whenever k >= its start
-    distance. Success therefore holds exactly on tasks whose (zone, mechanism)
-    equals the hardcoded (z, m) and whose start distance fits, and the bound is
-    the best such count. Feasibility of the sequence needs k >= |start_pos - z|
-    moves + 1 prepare + 1 activate step.
+    therefore equivalent to a fixed action sequence. Give the *driver* full
+    knowledge of the task and of that sequence -- an upper bound, since the
+    driver can delay but never hasten an arrival -- and the prey arrives exactly
+    when wanted, provided that step is at least its start distance and at most
+    its patience.
 
-    Single target only: with several prey the bound requires maximizing over
-    activation *schedules*; use `blind_search` (exponential, small configs).
+    CORRECTION (this replaces an earlier, wrong version of this bound). The
+    first version assumed the sequence commits to one zone and one method, and
+    returned 1/(n*mechanisms). That is false whenever the horizon is long enough
+    to walk the line: a blind preparer can prepare and fire SEVERAL traps in
+    turn, and the driver -- which knows everything -- simply holds the prey
+    until the sweep reaches its zone. At n=3 with horizon >= 8 a blind sweeper
+    reaches 1/3 of all tasks and, because the by='pair' test split leaves
+    exactly one prey type per zone, *100%* of that split. The bound is therefore
+    a function of the horizon and of the prey's patience, and this function now
+    maximizes over schedules (see blind_upper_bound); at targets=1 the schedule
+    relaxation drops nothing, so the value below is exact.
+
+    Practical consequence: the task is only about communication in the regime
+    where a sweep does not fit. Give the prey a finite `patience` (n=3 wants
+    patience=4, which the reference protocol meets and a two-trap sweep does
+    not) or keep the horizon below the sweep cost, and report this number
+    alongside any learned catch rate.
     """
-    corpus = tasks(n, 1, split, by)
+    report = blind_upper_bound(n=n, targets=1, split=split, by=by, horizon=horizon,
+                               start_pos=start_pos, mechanisms=mechanisms,
+                               patience=patience)
+    return {'split': split, 'by': by, 'tasks': report['tasks'],
+            'horizon': horizon, 'patience': patience,
+            'optimal_blind_success': report['upper_bound_catches_per_task'],
+            'exact': True,
+            'argmax_schedule_zone_mechanism_step':
+                report['argmax_schedule_zone_mechanism_step']}
+
+
+def blind_upper_bound(n=3, targets=2, split='all', by='pair', horizon=16,
+                      start_pos=0, mechanisms=None, task_list=None,
+                      patience=None):
+    """Provable upper bound on the message-blind catch rate for any number of
+    targets, by maximizing over *activation schedules* rather than sequences.
+    Reproduces `blind_reference` exactly when targets == 1.
+
+    Derivation. By the theorem in `blind_reference`, a blind preparer is one
+    fixed action sequence. Traps hold one charge, so all that matters about
+    zone z is the step of the FIRST activation there and the method standing in
+    that trap at that moment. Any sequence therefore induces a *schedule*: an
+    ordered list of distinct zones z_1..z_r with methods m_1..m_r fired at steps
+    s_1 < ... < s_r <= horizon. Feasibility is bounded below by counting steps:
+    by s_i the body must have walked the path start -> z_1 -> ... -> z_i and
+    spent one step preparing and one step firing each of the first i traps, so
+
+        s_i >= travel(start, z_1, ..., z_i) + 2i.
+
+    This is a *lower bound on cost* (a real sequence may also need to walk back
+    to pre-prepare a trap), hence an upper bound on what is schedulable.
+
+    A prey at z_i is then caught only if m_i is the method its type requires and
+    the driver can make it arrive at s_i, which needs s_i >= its start distance.
+    Larger s_i is never worse, so the best timings for a given order are
+    s_i = horizon - (r - i). What is dropped, and only ever helps the bound: the
+    driver's one-DRIVE-per-step budget across simultaneous prey, and the need to
+    re-visit zones whose traps were prepared out of order.
+
+    At targets == 1 only r = 1 schedules can score, and the relaxation drops
+    nothing, so the bound is attained -- it equals `blind_reference` and hence
+    the closed form. At targets > 1 it is an upper bound only; `blind_search`
+    gives the exact but exponential value on small configurations, and the two
+    agree on the anchor recorded in tests (n=2, targets=2, horizon=3).
+    """
+    corpus = tuple(task_list) if task_list is not None else tasks(n, targets, split, by)
     mechanisms = n if mechanisms is None else mechanisms
+    prey = sum(len(task.targets) for task in corpus)
+    demands = Counter((t.zone, mechanism_for(t.prey_type, mechanisms), t.start_distance)
+                      for task in corpus for t in task.targets)
+    # A prey flees at the end of step `patience`, so an activation after that
+    # catches nothing: the deadline caps every schedule.
+    horizon = min(horizon, horizon if patience is None else patience)
     best, argmax = 0, None
-    for zone in range(n):
-        for mechanism in range(mechanisms):
-            for k in range(1, horizon + 1):
-                if k < abs(start_pos - zone) + 2:
-                    continue
-                count = sum(1 for task in corpus
-                            for t in task.targets
-                            if t.zone == zone
-                            and mechanism_for(t.prey_type, mechanisms) == mechanism
-                            and t.start_distance <= k)
-                if count > best:
-                    best, argmax = count, (zone, mechanism, k)
-    return {'split': split, 'by': by, 'tasks': len(corpus),
-            'optimal_blind_success': best / len(corpus) if corpus else None,
-            'argmax_zone_mechanism_step': argmax}
+    for length in range(1, min(n, horizon) + 1):
+        for order in permutations(range(n), length):
+            travel, position, feasible = 0, start_pos, True
+            steps = []
+            for i, zone in enumerate(order, start=1):
+                travel += abs(position - zone)
+                position = zone
+                step = horizon - (length - i)
+                if step < travel + 2 * i:
+                    feasible = False
+                    break
+                steps.append(step)
+            if not feasible:
+                continue
+            for methods in product(range(mechanisms), repeat=length):
+                total = sum(count
+                            for (zone, mechanism, distance), count in demands.items()
+                            for i, z in enumerate(order)
+                            if z == zone and methods[i] == mechanism
+                            and distance <= steps[i])
+                if total > best:
+                    best, argmax = total, tuple(zip(order, methods, steps))
+    return {'split': split, 'by': by, 'targets': targets, 'tasks': len(corpus),
+            'prey': prey,
+            'upper_bound_catch_rate': best / prey if prey else None,
+            'upper_bound_catches_per_task': best / len(corpus) if corpus else None,
+            'exact': targets == 1,
+            'argmax_schedule_zone_mechanism_step': argmax}
 
 
 def blind_search(env_kwargs=None, task_list=None):
@@ -580,9 +699,18 @@ def blind_search(env_kwargs=None, task_list=None):
 
 if __name__ == '__main__':
     import json
-    print(json.dumps([blind_reference(split=s, by=b)
-                      for b in ('triple', 'pair') for s in ('all', 'train', 'test')],
-                     indent=2))
+    # The blind bound is a function of the horizon and the prey's patience,
+    # because a blind preparer can sweep the line and fire trap after trap.
+    print(json.dumps({'single_target_blind_bound_by_deadline': [
+        {'patience': p,
+         **{s: blind_reference(split=s, by='pair', horizon=8, patience=p)['optimal_blind_success']
+            for s in ('all', 'train', 'test')}}
+        for p in (4, 6, None)]}, indent=2))
+    print(json.dumps({'two_target_upper_bound': [
+        {'split': s, **{k: v for k, v in blind_upper_bound(targets=2, split=s, by='pair',
+                                                           horizon=12, patience=6).items()
+                        if k in ('upper_bound_catch_rate', 'exact')}}
+        for s in ('all', 'train', 'test')]}, indent=2))
     corpus = tasks(split='all')
     caught = sum(oracle_rollout(t)['caught'] for t in corpus)
     print(json.dumps({'tasks': len(corpus), 'oracle_prey_caught': caught,

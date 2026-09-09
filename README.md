@@ -41,10 +41,17 @@ window in which activating early wastes the trap's charge and activating late
 lets the prey escape. `trap_probe.py` perturbs one token at one step and reports
 which part of the decoded action (target / method / timing) moves; on identical
 intact behaviour it accepts the handwritten factorized code and rejects an
-entangled one. Both are handwritten controls -- no learned agent has been run on
-this variant yet, and the message-blind bound in `trap_prep.blind_reference`
-(1/9 on all tasks, 1/3 on the held-out pair split) is what a learned pair would
-have to beat. Relaxing the sender wiring also retains 100% transfer across three seeds:
+entangled one. `train_trap.py` is the REINFORCE trainer over the same
+environment, with matched-budget no-message and no-readiness controls.
+
+The message-blind bound is *not* a constant: a blind preparer can sweep the line
+and fire one trap after another while the driver stalls, so `blind_reference`
+depends on the horizon and on the prey's patience. Without a deadline the
+`by='pair'` test split -- which leaves exactly one prey type per zone -- is
+solvable blind, so held-out catch rates there mean nothing unless a deadline is
+set. At n=3, horizon 8 and patience 4 the reference protocol still solves every
+task while a two-trap sweep does not fit, and the bound is the intended 1/9
+(all), 1/6 (train), 1/3 (test). Relaxing the sender wiring also retains 100% transfer across three seeds:
 [receiver-only isolation](experiments/receiver-slots.md). Receiver position
 semantics remain imposed; word-order emergence has not been demonstrated.
 Successful coordination alone will not be treated as evidence of grammar.
@@ -68,6 +75,7 @@ python -m emergent_hunt.train --steps 2000 --seeds 0 1 2
 python -m emergent_hunt.train --by pair --steps 2000 --seeds 0 1 2 --output results/pair-smoke.json
 python -m emergent_hunt.trap_prep     # blind bounds + reference-protocol check
 python -m emergent_hunt.trap_probe    # token-selectivity matrix, both codes
+python -m emergent_hunt.train_trap --episodes 60000 --seeds 0 --probe
 ```
 
 Sender observes `(prey, direction)`, sends up to two discrete tokens; receiver

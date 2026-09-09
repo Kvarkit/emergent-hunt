@@ -80,6 +80,8 @@ class SelectivityTests(unittest.TestCase):
                          {'0': 'target', '1': 'method', '2': 'timing'})
         self.assertTrue(self.compositional['candidate_localized_binding'])
         self.assertEqual(self.compositional['exclusive_leakage'], 0.0)
+        # All the causal mass on "which target" sits in one token position.
+        self.assertEqual(self.compositional['column_concentration']['target'], 1.0)
 
     def test_method_token_never_moves_the_target_in_a_factorized_code(self):
         # The sharp, assumption-free discriminator: perturbing the slot that
@@ -90,8 +92,7 @@ class SelectivityTests(unittest.TestCase):
     def test_holistic_code_is_rejected_despite_identical_intact_behaviour(self):
         self.assertEqual(self.compositional['intact'], self.holistic['intact'])
         self.assertFalse(self.holistic['candidate_localized_binding'])
-        self.assertGreater(self.holistic['exclusive_leakage'],
-                           self.compositional['exclusive_leakage'])
+        self.assertLess(self.holistic['column_concentration']['target'], .8)
 
     def test_every_position_actually_has_a_causal_effect(self):
         for position in self.compositional['positions'].values():
@@ -110,6 +111,16 @@ class SelectivityTests(unittest.TestCase):
             self.assertEqual(row['best'],
                              self.compositional['best_component_per_position'][position])
             self.assertEqual(row['max_other'], 0.0)
+
+    def test_verdict_is_stable_across_corpus_sizes(self):
+        # The statistic must not depend on how many tasks happen to be probed:
+        # an earlier exclusivity-based verdict flipped between 12 and 24 tasks.
+        for size in (12, 24):
+            corpus = tasks(split='all')[:size]
+            self.assertTrue(selectivity(policy='compositional',
+                                        corpus=corpus)['candidate_localized_binding'], size)
+            self.assertFalse(selectivity(policy='holistic',
+                                         corpus=corpus)['candidate_localized_binding'], size)
 
     def test_probe_runs_on_the_held_out_split(self):
         # Novel combinations of familiar conditions: the probe must be runnable

@@ -2,6 +2,7 @@ import unittest
 
 from emergent_hunt.environment import held_out_pairs
 from emergent_hunt.trap_prep import (ACTIVATE, ACTIVE, CAUGHT, ESCAPED, HOLD,
+                                     blind_upper_bound,
                                      MOVE_RIGHT, WAIT, Target, TrapPrepHunt,
                                      TrapTask, blind_reference, blind_search,
                                      drive_action, mechanism_for,
@@ -216,7 +217,7 @@ class PrivacyTests(unittest.TestCase):
         observation, _ = env.reset(TrapTask((Target(0, 1, 2), Target(2, 0, 3))))
         self.assertEqual(set(observation),
                          {'step', 'steps_left', 'prey_type', 'zone', 'distance',
-                          'window_left', 'status'})
+                          'window_left', 'patience_left', 'status'})
 
     def test_blind_preparer_stream_is_a_function_of_its_own_actions_only(self):
         # Two tasks differing in prey type, distance and even target zone give a
@@ -294,11 +295,40 @@ class ProtocolValidationTests(unittest.TestCase):
             env.reset(TrapTask((Target(0, 0, 1), Target(9, 1, 1))))
 
     def test_horizon_terminates_an_idle_episode(self):
+        # With patience=None the deadline is the horizon itself, so an untouched
+        # prey is still ACTIVE on the last step and flees exactly as it ends.
         env = TrapPrepHunt(targets=1, split='all', horizon=4)
         steps = script(env, TrapTask((Target(0, 0, 3),)), [WAIT] * 6)
         self.assertEqual(len(steps), 4)
         self.assertTrue(steps[-1][1])
-        self.assertEqual(steps[-1][2]['status'], (ACTIVE,))
+        self.assertEqual(steps[-2][2]['status'], (ACTIVE,))
+        self.assertEqual(steps[-1][2]['status'], (ESCAPED,))
+        self.assertIn(('fled', 0), steps[-1][2]['events'])
+
+    def test_patience_makes_the_prey_flee_before_the_horizon(self):
+        # Spec point 3's "prey fled": the driver cannot stall indefinitely,
+        # which is what stops a message-blind sweep (see blind_upper_bound).
+        env = TrapPrepHunt(targets=1, split='all', horizon=8, patience=3)
+        steps = script(env, TrapTask((Target(0, 0, 3),)), [WAIT] * 8)
+        self.assertEqual(len(steps), 3)
+        self.assertIn(('fled', 0), steps[-1][2]['events'])
+        self.assertEqual(steps[-1][2]['status'], (ESCAPED,))
+
+    def test_stop_when_resolved_false_runs_the_whole_scene(self):
+        env = TrapPrepHunt(targets=1, split='all', horizon=6,
+                           stop_when_resolved=False)
+        steps = script(env, TrapTask((Target(0, 0, 1),)),
+                       [WAIT] * 6, driver=[drive_action(0)] + [HOLD] * 5)
+        self.assertEqual(len(steps), 6)
+        self.assertIn(('escaped', 0), steps[0][2]['events'])
+        # Preparation still pays after the prey is gone, which is what gives a
+        # learner a gradient on target/method while timing is still random.
+        env2 = TrapPrepHunt(targets=1, split='all', horizon=6,
+                            stop_when_resolved=False)
+        steps2 = script(env2, TrapTask((Target(0, 0, 1),)),
+                        [WAIT, prepare_action(mechanism_for(0, 3))],
+                        driver=[drive_action(0), HOLD])
+        self.assertAlmostEqual(steps2[1][0], .25)
 
 
 class CostTests(unittest.TestCase):
@@ -321,13 +351,35 @@ class BlindControlTests(unittest.TestCase):
     """The message-blind bound must be exact, not an empirical guess: it is the
     number the communication condition has to beat."""
 
-    def test_reference_values_match_the_closed_form(self):
-        self.assertAlmostEqual(blind_reference(split='all')['optimal_blind_success'], 1 / 9)
-        self.assertAlmostEqual(blind_reference(split='train', by='pair')['optimal_blind_success'], 1 / 6)
-        self.assertAlmostEqual(blind_reference(split='test', by='pair')['optimal_blind_success'], 1 / 3)
-        for split in ('all', 'train', 'test'):
+    def test_one_trap_per_sweep_step_values(self):
+        # With a deadline that leaves room for exactly one trap, the bound is
+        # the "commit to one (zone, method)" value: 1/(n*mechanisms) overall.
+        for by in ('pair', 'triple'):
             self.assertAlmostEqual(
-                blind_reference(split=split, by='triple')['optimal_blind_success'], 1 / 9)
+                blind_reference(split='all', by=by, horizon=8, patience=4)['optimal_blind_success'],
+                1 / 9, msg=by)
+        self.assertAlmostEqual(
+            blind_reference(split='train', by='pair', horizon=8, patience=4)['optimal_blind_success'],
+            1 / 6)
+        self.assertAlmostEqual(
+            blind_reference(split='test', by='pair', horizon=8, patience=4)['optimal_blind_success'],
+            1 / 3)
+
+    def test_a_long_horizon_lets_a_blind_sweeper_win(self):
+        # The correction that motivated `patience`: without a deadline the blind
+        # preparer prepares and fires every trap in turn while the driver stalls,
+        # and the by='pair' test split -- exactly one prey type per zone -- is
+        # then solved BLIND. Any catch rate on that split must be read against
+        # this number, not against 1/3.
+        self.assertAlmostEqual(
+            blind_reference(split='test', by='pair', horizon=16)['optimal_blind_success'], 1.0)
+        self.assertAlmostEqual(
+            blind_reference(split='all', by='pair', horizon=16)['optimal_blind_success'], 1 / 3)
+        # The bound is monotone in the horizon and drops back as it tightens.
+        values = [blind_reference(split='all', by='pair', horizon=h)['optimal_blind_success']
+                  for h in range(4, 12)]
+        self.assertEqual(values, sorted(values))
+        self.assertAlmostEqual(values[0], 1 / 9)
 
     def test_reference_agrees_with_brute_force_through_the_simulator(self):
         # Small enough to enumerate every fixed preparer sequence and every
@@ -339,11 +391,34 @@ class BlindControlTests(unittest.TestCase):
         self.assertAlmostEqual(searched['optimal_blind_catch_rate'],
                                analytic['optimal_blind_success'])
 
+    def test_multi_target_bound_agrees_with_brute_force_on_a_small_config(self):
+        # targets>1 needs a maximization over activation schedules, and only
+        # blind_search is exact. This is the anchor: on a configuration small
+        # enough to brute-force, the schedule bound is attained, not merely
+        # valid.
+        kwargs = dict(n=2, targets=2, mechanisms=2, horizon=3, by='pair')
+        corpus = [task for task in tasks(n=2, targets=2, split='all', by='pair')
+                  if all(t.start_distance == 1 for t in task.targets)]
+        searched = blind_search(env_kwargs=kwargs, task_list=corpus)
+        bound = blind_upper_bound(n=2, targets=2, by='pair', horizon=3,
+                                  mechanisms=2, task_list=corpus)
+        self.assertAlmostEqual(searched['optimal_blind_catch_rate'],
+                               bound['upper_bound_catches_per_task'])
+        self.assertEqual(searched['optimal_blind_catch_rate'], .5)
+
+    def test_multi_target_bound_is_an_upper_bound_not_a_claim_of_exactness(self):
+        report = blind_upper_bound(targets=2, split='test', by='pair', horizon=12)
+        self.assertFalse(report['exact'])
+        self.assertTrue(blind_upper_bound(targets=1, split='test', by='pair')['exact'])
+
     def test_reference_protocol_beats_the_blind_bound_by_a_wide_margin(self):
         corpus = tasks(targets=1, split='test', by='pair')
-        caught = sum(oracle_rollout(task)['caught'] for task in corpus)
+        caught = sum(oracle_rollout(task, targets=1, horizon=8, patience=4)['caught']
+                     for task in corpus)
         self.assertEqual(caught / len(corpus), 1.0)
-        self.assertLess(blind_reference(split='test', by='pair')['optimal_blind_success'], .5)
+        self.assertAlmostEqual(
+            blind_reference(split='test', by='pair', horizon=8,
+                            patience=4)['optimal_blind_success'], 1 / 3)
 
 
 class MutedProtocolTests(unittest.TestCase):
