@@ -5,8 +5,18 @@ factor* and asks which token positions move. This layer runs the other
 direction, which is what the trap-preparation spec asks for: perturb one token
 position at a time and ask which part of the *decoded action* moves -- target
 (which trap was acted on), method (which preparation), timing (when the trap was
-activated). A compositional protocol should give a near-diagonal
-position-by-component matrix; a holistic code should leak across components.
+activated). A compositional protocol should concentrate each component's causal
+mass in one token position; a holistic code should spread it.
+
+The verdict rests on the `target` column specifically -- how much of the causal
+mass on "which trap was acted on" sits in a single position. That is spec point
+4's requirement (a message must bind an action to a specific target) and it is
+also the only column the task's own physics leaves clean: a trap can only be
+prepared or fired where the preparer stands, so retargeting can turn a prepare
+into a move or cancel a firing, while re-methoding can never retarget. Raw
+diagonal mass would therefore penalize a perfectly factorized code for the
+environment's coupling. The full matrix, the exclusive-effect matrix and the
+mute/reverse/roll controls are all reported alongside.
 
 Nothing here assigns meanings to tokens or positions in advance. Substituted
 values are drawn from the values that actually occur at that position in the
