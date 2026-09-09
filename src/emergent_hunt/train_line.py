@@ -29,11 +29,12 @@ def train(seed=0, episodes=50000, length=5, horizon=8, vocab=8,
         env = LineHunt(length, horizon, crossed=crossed); env.reset(goal, trap)
         ha, hb = a.initial_state(), b.initial_state()
         incoming_a = incoming_b = None
-        action_logs, message_logs, values, rewards, sender_losses = [], [], [], [], []
+        action_logs, message_logs, values, message_values, rewards, sender_losses = [], [], [], [], [], []
         prev_da = abs(env.state.a_pos - goal); prev_db = abs(env.state.b_pos - trap)
         for _ in range(horizon):
             oa, ia = line_observation(env, "a", vocab, incoming_a)
             ob, ib = line_observation(env, "b", vocab, incoming_b)
+            message_values.append(((value_a(ha).detach() + value_b(hb).detach()) / 2).squeeze(-1))
             ma, aa, ha = a(oa, ia, ha); mb, ab, hb = b(ob, ib, hb)
             dm_a, da = Categorical(logits=ma), Categorical(logits=aa)
             dm_b, db = Categorical(logits=mb), Categorical(logits=ab)
@@ -48,7 +49,9 @@ def train(seed=0, episodes=50000, length=5, horizon=8, vocab=8,
             prev_da, prev_db = abs(env.state.a_pos - goal), abs(env.state.b_pos - trap)
             rewards.append(float(terminal_reward) + float(progress))
             action_logs.append(da.log_prob(action_a) + db.log_prob(action_b))
-            message_logs.append(dm_a.log_prob(token_a) + dm_b.log_prob(token_b))
+            forced = crossed and ep <= canonical_bootstrap_episodes
+            message_logs.append(torch.tensor(0.0) if forced else
+                                dm_a.log_prob(token_a) + dm_b.log_prob(token_b))
             if crossed and sender_aux:
                 sender_losses.append(torch.nn.functional.cross_entropy(ma, torch.tensor([trap])) +
                                      torch.nn.functional.cross_entropy(mb, torch.tensor([goal])))
@@ -66,12 +69,12 @@ def train(seed=0, episodes=50000, length=5, horizon=8, vocab=8,
         returns = torch.tensor(list(reversed(returns)), dtype=torch.float32)
         value_tensor = torch.cat(values) if values else torch.zeros(1)
         advantages = returns - value_tensor.detach() if critic else returns
-        if len(advantages) > 1:
-            advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-6)
         policy_loss = sum(-log * adv for log, adv in zip(action_logs, advantages)) / max(1, len(action_logs))
         if use_messages and len(message_logs) > 1:
             # Message at t is causally delivered before action t+1.
-            msg_adv = advantages[1:]
+            msg_returns = returns[1:]
+            msg_base = torch.cat(message_values[1:])
+            msg_adv = msg_returns - msg_base
             message_loss = sum(-log * adv for log, adv in zip(message_logs[:-1], msg_adv)) / max(1, len(msg_adv))
         else:
             message_loss = torch.tensor(0.0)
