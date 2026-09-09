@@ -34,7 +34,17 @@ beat the no-message control; see `results/multiround-full-10000.json`.
 The proposed transition to evolving multi-step state, partial reward and
 preference-sensitive target choice is specified in
 [`experiments/multistep-protocol.md`](experiments/multistep-protocol.md).
-Relaxing the sender wiring also retains 100% transfer across three seeds:
+A richer task variant is implemented in `trap_prep.py`: reach -> prepare(method)
+-> activate, several simultaneous prey and one trap per zone, partial reward for
+correct preparation (paid once) and full reward only for a catch, plus a firing
+window in which activating early wastes the trap's charge and activating late
+lets the prey escape. `trap_probe.py` perturbs one token at one step and reports
+which part of the decoded action (target / method / timing) moves; on identical
+intact behaviour it accepts the handwritten factorized code and rejects an
+entangled one. Both are handwritten controls -- no learned agent has been run on
+this variant yet, and the message-blind bound in `trap_prep.blind_reference`
+(1/9 on all tasks, 1/3 on the held-out pair split) is what a learned pair would
+have to beat. Relaxing the sender wiring also retains 100% transfer across three seeds:
 [receiver-only isolation](experiments/receiver-slots.md). Receiver position
 semantics remain imposed; word-order emergence has not been demonstrated.
 Successful coordination alone will not be treated as evidence of grammar.
@@ -56,6 +66,8 @@ python -m unittest discover -s tests -v
 python -m emergent_hunt.evaluate
 python -m emergent_hunt.train --steps 2000 --seeds 0 1 2
 python -m emergent_hunt.train --by pair --steps 2000 --seeds 0 1 2 --output results/pair-smoke.json
+python -m emergent_hunt.trap_prep     # blind bounds + reference-protocol check
+python -m emergent_hunt.trap_probe    # token-selectivity matrix, both codes
 ```
 
 Sender observes `(prey, direction)`, sends up to two discrete tokens; receiver
