@@ -68,11 +68,27 @@ trap -- which never happened once in 27 tasks, because DRIVE has no reward
 channel except a catch the driver has never seen. The optional `approach` term
 (deducted from the catch reward, so a success still totals 1.0) pays for exactly
 that state. The rerun (`results/trap-fixed-s*.json`, horizon 4, start_pos 1, 60k
-episodes, 3 seeds) puts `first_guess_rate` at 0.500 in every communication and
-no_readiness run against 0.333 -- the blind ceiling -- in every no_message run,
-so the method is being transmitted; catches reach 0.167/0.000/0.111 against a
-blind bound of 0.167, so they are not; and the held-out split stays at 0.000,
-below the 1/3 a uniform guess would score. Relaxing the sender wiring also retains 100% transfer across three seeds:
+episodes, 3 seeds, 3 modes) puts `first_guess_rate` at 0.500 in every
+communication and no_readiness run against 0.333 -- the blind ceiling -- in every
+no_message run.
+
+At 200k episodes (`results/trap-long-s*.json`, communication vs no_message,
+three seeds, 101 evaluations each) that separation is unambiguous. On the train
+split the communication arm peaks at 0.667/0.667/0.611 first-guess and stands
+above the 0.333 blind ceiling for 71/60/93 of its evaluations; the no_message
+arm peaks at exactly 0.333 and clears it in 0 of 303. So the required mechanism
+*is* being transmitted, replicated across seeds against a matched-budget control
+that never once beats its own exact bound.
+
+Catches are still a negative result. Against a 0.167 blind bound the
+communication arm peaks at 0.278/0.000/0.111 and only seed 0 clears the bound at
+all -- for 36 evaluations, after which it collapses back to 0.000 rather than
+converging, which is why `trap_diagnose.summarize_history` reports best and
+time-above-bound and not only the final number. And nothing transfers: every
+figure on the held-out `by='pair'` split is 0.000 in both arms and all three
+seeds, below the 1/3 a uniform guess would score, so the learned code is a
+table over the training pairs and not a composition of them.
+Relaxing the sender wiring also retains 100% transfer across three seeds:
 [receiver-only isolation](experiments/receiver-slots.md). Receiver position
 semantics remain imposed; word-order emergence has not been demonstrated.
 Successful coordination alone will not be treated as evidence of grammar.
