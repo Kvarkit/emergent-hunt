@@ -83,8 +83,8 @@ def train_sender_with_frozen_receiver(receiver, seed=0, episodes=3000,
             if step == 0:
                 dist = Categorical(logits=message_logits)
                 token = dist.sample(); log = dist.log_prob(token)
-            else:
-                token = torch.tensor(trap)
+            # Repeat the sampled token throughout the episode. Never replace it
+            # with the hidden target: evaluation has no such oracle channel.
             # B receives A's token one step later and acts from frozen policy.
             ob, _ = line_observation(env, 'b', length, incoming_receiver)
             _, action_logits, hr = receiver(ob, torch.nn.functional.one_hot(
@@ -99,8 +99,15 @@ def train_sender_with_frozen_receiver(receiver, seed=0, episodes=3000,
     return sender
 
 
-def evaluate_staged(sender, receiver, length=5, horizon=8):
-    """Evaluate argmax sender + frozen receiver with one-step delivery."""
+def evaluate_staged(sender, receiver, length=5, horizon=8, constant_token=None):
+    """Evaluate a committed token; optional constant removes target information.
+
+    Compare all constants on the same frozen policies and exhaustive world grid.
+    This is a channel ablation, not an independently trained no-message bound.
+    """
+    if constant_token is not None and (type(constant_token) is not int or
+                                       not 0 <= constant_token < length):
+        raise ValueError('constant_token must be a vocabulary index')
     good = 0
     with torch.no_grad():
         for goal in range(length):
@@ -111,7 +118,8 @@ def evaluate_staged(sender, receiver, length=5, horizon=8):
                 for step in range(horizon):
                     oa,_=line_observation(env,'a',length,incoming)
                     ms,_,hs=sender(oa,torch.zeros(1,length),hs)
-                    token=int(ms.argmax())
+                    if step == 0:
+                        token=int(ms.argmax()) if constant_token is None else constant_token
                     ob,_=line_observation(env,'b',length,incoming)
                     _,mb,hr=receiver(ob,torch.nn.functional.one_hot(torch.tensor([incoming if incoming is not None else 0]),length).float(),hr)
                     action_b=2 if step==0 else int(mb.argmax())
