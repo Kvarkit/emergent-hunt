@@ -14,7 +14,14 @@ from .line_rollout import rollout_episode
 def train(seed=0, episodes=50000, length=5, horizon=8, vocab=8,
           hidden_dim=32, use_messages=True, crossed=False,
           critic=True, entropy_coef=0.01, canonical_bootstrap_episodes=0,
-          sender_aux=0.0, lr=3e-3):
+          sender_aux=0.0, lr=3e-3, progress_weight=0.0, step_cost=0.0,
+          trigger_delay=0, gamma=1.0):
+    if gamma != 1.0:
+        raise ValueError('dynamic episodic reward currently requires gamma=1')
+    env_config = dict(length=length, horizon=horizon, crossed=crossed,
+                      progress_weight=progress_weight, step_cost=step_cost,
+                      trigger_delay=trigger_delay)
+    LineHunt(**env_config)  # validate before training
     random.seed(seed); torch.manual_seed(seed); torch.set_num_threads(1)
     a, b = GRULineAgent(vocab=vocab, hidden_dim=hidden_dim), GRULineAgent(vocab=vocab, hidden_dim=hidden_dim)
     value_a = torch.nn.Linear(hidden_dim, 1)
@@ -26,11 +33,11 @@ def train(seed=0, episodes=50000, length=5, horizon=8, vocab=8,
     history = []
     for ep in range(1, episodes + 1):
         goal, trap = random.sample(range(length), 2)
-        env = LineHunt(length, horizon, crossed=crossed); env.reset(goal, trap)
+        env = LineHunt(**env_config); env.reset(goal, trap)
         ha, hb = a.initial_state(), b.initial_state()
         incoming_a = incoming_b = None
         action_logs, message_logs, values, message_values, rewards, sender_losses = [], [], [], [], [], []
-        prev_da = abs(env.state.a_pos - goal); prev_db = abs(env.state.b_pos - trap)
+        task_return = 0.0
         for _ in range(horizon):
             oa, ia = line_observation(env, "a", vocab, incoming_a)
             ob, ib = line_observation(env, "b", vocab, incoming_b)
@@ -42,12 +49,9 @@ def train(seed=0, episodes=50000, length=5, horizon=8, vocab=8,
             token_b, action_b = dm_b.sample(), db.sample()
             if crossed and ep <= canonical_bootstrap_episodes:
                 token_a, token_b = torch.tensor(trap), torch.tensor(goal)
-            old_a, old_b = env.state.a_pos, env.state.b_pos
-            _, terminal_reward, done, _ = env.step(int(action_a), int(action_b))
-            progress = ((prev_da - abs(env.state.a_pos - goal)) +
-                        (prev_db - abs(env.state.b_pos - trap))) * 0.03
-            prev_da, prev_db = abs(env.state.a_pos - goal), abs(env.state.b_pos - trap)
-            rewards.append(float(terminal_reward) + float(progress))
+            _, reward, done, info = env.step(int(action_a), int(action_b))
+            rewards.append(float(reward))
+            task_return += info['task_reward']
             action_logs.append(da.log_prob(action_a) + db.log_prob(action_b))
             forced = crossed and ep <= canonical_bootstrap_episodes
             message_logs.append(torch.tensor(0.0) if forced else
@@ -65,7 +69,7 @@ def train(seed=0, episodes=50000, length=5, horizon=8, vocab=8,
         returns = []
         running = 0.0
         for reward in reversed(rewards):
-            running = reward + 0.97 * running; returns.append(running)
+            running = reward + gamma * running; returns.append(running)
         returns = torch.tensor(list(reversed(returns)), dtype=torch.float32)
         value_tensor = torch.cat(values) if values else torch.zeros(1)
         advantages = returns - value_tensor.detach() if critic else returns
@@ -86,7 +90,9 @@ def train(seed=0, episodes=50000, length=5, horizon=8, vocab=8,
                 entropy_coef * entropy + sender_aux * decay * sender_loss)
         opt.zero_grad(); loss.backward(); torch.nn.utils.clip_grad_norm_(list(a.parameters()) + list(b.parameters()), 5.0); opt.step()
         if ep == 1 or ep % 1000 == 0 or ep == episodes:
-            history.append({"episode": ep, "return": sum(rewards), "loss": float(loss.detach())})
+            history.append({"episode": ep, "return": sum(rewards), "loss": float(loss.detach()),
+                            "task_return": task_return, "success": env.state.success,
+                            "elapsed": env.state.step})
     return {"seed": seed, "episodes": episodes, "length": length,
             "horizon": horizon, "vocab": vocab, "hidden_dim": hidden_dim,
             "use_messages": use_messages, "history": history,
@@ -94,8 +100,26 @@ def train(seed=0, episodes=50000, length=5, horizon=8, vocab=8,
             "critic": critic, "entropy_coef": entropy_coef,
             "canonical_bootstrap_episodes": canonical_bootstrap_episodes,
             "sender_aux": sender_aux,
-            "lr": lr,
+            "lr": lr, "env_config": env_config, "gamma": gamma,
             "agents": (a, b)}
+
+
+def evaluate_dynamic(result, message_mode='actual'):
+    """Evaluate frozen agents using the exact environment used in training."""
+    a, b = result['agents']
+    rows = []
+    with torch.no_grad():
+        for goal in range(result['length']):
+            for trap in range(result['length']):
+                if goal == trap:
+                    continue
+                trace = rollout_episode(a, b, goal, trap, vocab=result['vocab'],
+                                        use_messages=result['use_messages'],
+                                        message_mode=message_mode, **result['env_config'])
+                rows.append({'success': trace[-1]['info']['success'],
+                             'task_return': sum(x['info']['task_reward'] for x in trace),
+                             'return': sum(x['reward'] for x in trace)})
+    return {key: sum(row[key] for row in rows) / len(rows) for key in rows[0]}
 
 
 def save_checkpoint(result, path):

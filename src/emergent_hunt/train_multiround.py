@@ -14,10 +14,14 @@ def _route_messages(ma, mb, vocab, task, use_messages=True):
     """Return (last_a, last_b), i.e. input for B and A respectively."""
     if not use_messages:
         return torch.zeros(1, vocab), torch.zeros(1, vocab)
+    def encode(message):
+        # Straight-through categorical vectors already have the wire shape.
+        # Calling one_hot on them both fails and would discard their gradient.
+        return message if message.is_floating_point() else oh(message, vocab)
     if task == 'symmetric':
-        return oh(ma, vocab), (oh(mb, vocab) if mb is not None
+        return encode(ma), (encode(mb) if mb is not None
                                else torch.zeros(1, vocab))
-    return oh(ma, vocab), torch.zeros(1, vocab)
+    return encode(ma), torch.zeros(1, vocab)
 
 
 class Agent(nn.Module):
@@ -269,7 +273,7 @@ def run(seed=0, episodes=3000, rounds=2, vocab=8, zones=4, use_messages=True,
                                        _pair_is_held_out(trap_t.item(), trap_z.item(), zones, holdout_mod)):
                 break
         last_a = torch.zeros(1,vocab); last_b = torch.zeros(1,vocab)
-        logs=[]; values=[]; aux_losses=[]; sender_losses=[]; action_losses=[]
+        logs=[]; values=[]; message_terms=[]; aux_losses=[]; sender_losses=[]; action_losses=[]
         active_task = ('one_way' if curriculum and ep <= episodes // 2
                        else communication_task)
         reverse_probability = (min(1.0, ep / max(1, episodes // 2))
@@ -279,8 +283,8 @@ def run(seed=0, episodes=3000, rounds=2, vocab=8, zones=4, use_messages=True,
             marker = oh(torch.tensor([r]), rounds)
             pa = torch.cat((oh(prey_t,type_count), oh(prey_z,zones), marker), -1)
             pb = torch.cat((oh(trap_t,type_count), oh(trap_z,zones), marker), -1)
-            ta, _, _, _ = a(pa, last_b)
-            tb, _, _, _ = b(pb, last_a)
+            ta, _, pre_va, _ = a(pa, last_b)
+            tb, _, pre_vb, _ = b(pb, last_a)
             if use_messages:
                 teacher_forced = ep <= receiver_bootstrap_episodes
                 if teacher_forced:
@@ -310,6 +314,11 @@ def run(seed=0, episodes=3000, rounds=2, vocab=8, zones=4, use_messages=True,
             else:
                 last_a, last_b = _route_messages(None, None, vocab, active_task, False)
                 message_logs = []
+            if message_logs:
+                # The baseline must precede sampling this round's messages.
+                # A post-delivery value depends on the sampled token and
+                # introduces bias even when detached from autograd.
+                message_terms.append((sum(message_logs), (pre_va + pre_vb) / 2))
             # Action is chosen after exchange.  The type component is a
             # deliberate communication bottleneck: A must guess trap_t and B
             # must guess prey_t.
@@ -317,7 +326,9 @@ def run(seed=0, episodes=3000, rounds=2, vocab=8, zones=4, use_messages=True,
             _, ab, vb, b_decode = b(pb, last_a)
             daction, baction = Categorical(logits=aa), Categorical(logits=ab)
             act_a, act_b = daction.sample(), baction.sample()
-            logs.append(sum(message_logs) + daction.log_prob(act_a) + baction.log_prob(act_b))
+            # Earlier actions do not change this symbolic world's state and
+            # cannot affect the terminal reward. Credit only the final action.
+            logs.append(daction.log_prob(act_a) + baction.log_prob(act_b))
             values.append((va+vb)/2)
             # Privileged target is used only as an auxiliary training signal;
             # neither agent receives the partner type as an observation.
@@ -351,8 +362,11 @@ def run(seed=0, episodes=3000, rounds=2, vocab=8, zones=4, use_messages=True,
         # success signal rather than being silently conflated with shaping.
         reward = 0.15 * zone_score + 0.40 * type_score + 0.45 * terminal
         ret = reward.detach()
-        policy_loss = sum(-log * (ret-val.detach()) + .5*(val-ret).square()
-                          for log,val in zip(logs,values)) / rounds
+        policy_loss = (-logs[-1] * (ret-values[-1].detach()) +
+                       .5 * (values[-1]-ret).square())
+        for message_log, pre_value in message_terms:
+            policy_loss = policy_loss + (-message_log * (ret-pre_value.detach()) +
+                                         .5*(pre_value-ret).square()) / rounds
         decay = max(0.0, 1.0 - ep / episodes) if auxiliary_decay else 1.0
         effective_aux = receiver_aux * decay if use_messages else 0.0
         effective_sender_aux = sender_aux * decay if use_messages else 0.0
@@ -372,6 +386,9 @@ def run(seed=0, episodes=3000, rounds=2, vocab=8, zones=4, use_messages=True,
                             'loss':loss.item()})
     eval_task = communication_task
     return {'seed':seed,'episodes':episodes,'rounds':rounds,'use_messages':use_messages,
+            'terminal_success_ceiling': (1.0 if eval_task == 'one_way'
+                                         else 1.0 - 1.0 / type_count),
+            'protocol_scope': 'static symbolic exchange; only final actions affect reward',
             'communication_task': communication_task, 'curriculum': curriculum,
             'soft_curriculum': soft_curriculum,
             'coupled': coupled, 'receiver_aux': receiver_aux, 'sender_aux': sender_aux,

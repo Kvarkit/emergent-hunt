@@ -7,9 +7,11 @@ from .line_policy import line_observation
 
 def rollout_episode(agent_a, agent_b, goal_pos, trap_pos, length=5, horizon=8,
                     vocab=8, use_messages=True, crossed=False,
-                    message_mode="actual"):
+                    message_mode="actual", progress_weight=0.0, step_cost=0.0,
+                    trigger_delay=0):
     """Collect a complete deterministic (argmax) episode without state leaks."""
-    env = LineHunt(length, horizon, crossed=crossed)
+    env = LineHunt(length, horizon, crossed=crossed, progress_weight=progress_weight,
+                   step_cost=step_cost, trigger_delay=trigger_delay)
     env.reset(goal_pos, trap_pos)
     ha, hb = agent_a.initial_state(), agent_b.initial_state()
     incoming_a = incoming_b = None

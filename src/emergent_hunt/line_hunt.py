@@ -25,12 +25,20 @@ class LineHuntState:
 
 
 class LineHunt:
-    def __init__(self, length: int = 5, horizon: int = 8, crossed: bool = False):
+    def __init__(self, length: int = 5, horizon: int = 8, crossed: bool = False,
+                 progress_weight: float = 0.0, step_cost: float = 0.0,
+                 trigger_delay: int = 0):
         if length < 3 or horizon < 1:
             raise ValueError("length must be >=3 and horizon >=1")
         self.length = length
         self.horizon = horizon
         self.crossed = crossed
+        if not 0 <= progress_weight < float('inf') or not 0 <= step_cost < float('inf'):
+            raise ValueError('reward coefficients must be finite and nonnegative')
+        if type(trigger_delay) is not int or trigger_delay < 0:
+            raise ValueError('trigger_delay must be a nonnegative integer')
+        self.progress_weight, self.step_cost = progress_weight, step_cost
+        self.trigger_delay = trigger_delay
         self._state = None
 
     @property
@@ -87,11 +95,26 @@ class LineHunt:
         new_b = self._move(s.b_pos, action_b)
         success = (new_a == s.goal_pos and new_b == s.trap_pos and
                    action_b == TRIGGER)
-        terminal = success or s.step + 1 >= self.horizon
-        self._state = LineHuntState(s.step + 1, new_a, new_b, s.goal_pos,
+        wrong_trigger = action_b == TRIGGER and new_b != s.trap_pos
+        elapsed = min(1 + self.trigger_delay * int(wrong_trigger),
+                      self.horizon - s.step)
+        terminal = success or s.step + elapsed >= self.horizon
+        self._state = LineHuntState(s.step + elapsed, new_a, new_b, s.goal_pos,
                                     s.trap_pos, terminal, success)
-        reward = 1.0 if success else 0.0
-        info = {"a_pos": new_a, "b_pos": new_b, "success": int(success)}
+        before_distance = abs(s.a_pos-s.goal_pos) + abs(s.b_pos-s.trap_pos)
+        after_distance = abs(new_a-s.goal_pos) + abs(new_b-s.trap_pos)
+        # Potential shaping for undiscounted episodic return (gamma=1).
+        # Terminal potential is zero even at timeout, preventing agents from
+        # accumulating progress reward by oscillating or stopping near a goal.
+        potential_before = -self.progress_weight * before_distance
+        potential_after = 0.0 if terminal else -self.progress_weight * after_distance
+        shaping = potential_after - potential_before
+        reward = float(success) - self.step_cost * elapsed + shaping
+        info = {"a_pos": new_a, "b_pos": new_b, "success": int(success),
+                "distance": after_distance, "distance_progress": before_distance-after_distance,
+                "wrong_trigger": int(wrong_trigger), "elapsed": elapsed,
+                "task_reward": float(success)-self.step_cost*elapsed,
+                "shaping_reward": shaping}
         return {"a": self.observe("a"), "b": self.observe("b")}, reward, terminal, info
 
 

@@ -4,6 +4,39 @@ from emergent_hunt.line_hunt import LEFT, RIGHT, TRIGGER, LineHunt, oracle_rollo
 
 
 class LineHuntTests(unittest.TestCase):
+    def test_actions_change_next_observation_and_progress(self):
+        env = LineHunt(crossed=True, progress_weight=.1, step_cost=.01)
+        env.reset(4, 0, start_a=1, start_b=3)
+        obs, toward, _, info = env.step(RIGHT, LEFT)
+        self.assertEqual((obs['a']['self_pos'], obs['b']['self_pos']), (2,2))
+        self.assertEqual(info['distance_progress'], 2)
+        _, away, _, info = env.step(LEFT, RIGHT)
+        self.assertEqual(info['distance_progress'], -2)
+        self.assertGreater(toward, 0)
+        self.assertLess(away, 0)
+        self.assertAlmostEqual(toward+away, -.02)
+
+    def test_wrong_activation_consumes_recovery_time(self):
+        env = LineHunt(crossed=True, trigger_delay=2, step_cost=.01)
+        env.reset(4, 0)
+        obs, reward, done, info = env.step(2, TRIGGER)
+        self.assertEqual(obs['b']['step'], 3)
+        self.assertEqual(info['wrong_trigger'], 1)
+        self.assertAlmostEqual(reward, -.03)
+        self.assertFalse(done)
+
+    def test_terminal_potential_cancels_path_dependent_progress(self):
+        totals=[]
+        for actions in (((RIGHT,LEFT),(LEFT,RIGHT)), ((2,2),(2,2))):
+            env=LineHunt(horizon=2, crossed=True, progress_weight=.1)
+            env.reset(4,0)
+            total=0
+            for a,b in actions:
+                _,reward,_,_=env.step(a,b)
+                total+=reward
+            totals.append(total)
+        self.assertAlmostEqual(totals[0],totals[1])
+
     def test_oracle_reaches_goal_and_trigger(self):
         env, trace = oracle_rollout(goal_pos=3, trap_pos=1)
         self.assertTrue(env.state.success)

@@ -4,6 +4,20 @@ from emergent_hunt.train_multiround import run, _route_messages
 import torch
 
 class MultiRoundLearningTests(unittest.TestCase):
+    def test_straight_through_wire_keeps_gradient_and_direction(self):
+        logits = torch.zeros(1, 4, requires_grad=True)
+        wire = torch.nn.functional.gumbel_softmax(logits, hard=True)
+        last_a, last_b = _route_messages(wire, None, 4, 'symmetric')
+        self.assertIs(last_a, wire)
+        self.assertEqual(last_b.sum().item(), 0)
+        (last_a * torch.arange(4)).sum().backward()
+        self.assertGreater(logits.grad.abs().sum().item(), 0)
+
+    def test_differentiable_training_runs_end_to_end(self):
+        result = run(seed=0, episodes=5, rounds=2, zones=2, type_count=2,
+                     differentiable_messages=True)
+        self.assertTrue(math.isfinite(result['history'][-1]['loss']))
+
     def test_short_run_finite(self):
         r = run(seed=0, episodes=20)
         self.assertEqual(r['episodes'], 20)
