@@ -6,9 +6,9 @@ from .line_policy import line_observation
 
 
 def rollout_episode(agent_a, agent_b, goal_pos, trap_pos, length=5, horizon=8,
-                    vocab=8, use_messages=True):
+                    vocab=8, use_messages=True, crossed=False):
     """Collect a complete deterministic (argmax) episode without state leaks."""
-    env = LineHunt(length, horizon)
+    env = LineHunt(length, horizon, crossed=crossed)
     env.reset(goal_pos, trap_pos)
     ha, hb = agent_a.initial_state(), agent_b.initial_state()
     incoming_a = incoming_b = None
@@ -42,7 +42,7 @@ def rollout_episode(agent_a, agent_b, goal_pos, trap_pos, length=5, horizon=8,
 
 
 def collect_grid(agent_a, agent_b, length=5, horizon=8, vocab=8,
-                 use_messages=True):
+                 use_messages=True, crossed=False):
     """Collect trajectories for all distinct goal/trap positions."""
     records = []
     for goal in range(length):
@@ -50,5 +50,29 @@ def collect_grid(agent_a, agent_b, length=5, horizon=8, vocab=8,
             if goal == trap:
                 continue
             records.extend(rollout_episode(agent_a, agent_b, goal, trap,
-                                            length, horizon, vocab, use_messages))
+                                            length, horizon, vocab, use_messages, crossed))
     return records
+
+
+def canonical_crossed_rollout(goal_pos, trap_pos, length=5, horizon=8):
+    """Upper-bound policy: each agent sends its observed partner target."""
+    env = LineHunt(length, horizon, crossed=True)
+    env.reset(goal_pos, trap_pos)
+    incoming_a = incoming_b = None
+    trace = []
+    for _ in range(horizon):
+        oa, ob = env.observe("a"), env.observe("b")
+        token_a, token_b = oa["partner_target"], ob["partner_target"]
+        def move(pos, target, trigger=False):
+            if pos < target: return 1
+            if pos > target: return 0
+            return 3 if trigger else 2
+        action_a = move(env.state.a_pos, incoming_a, False) if incoming_a is not None else 2
+        action_b = move(env.state.b_pos, incoming_b, True) if incoming_b is not None else 2
+        trace.append({"step": env.state.step, "tokens": (token_a, token_b),
+                      "actions": (action_a, action_b)})
+        incoming_a, incoming_b = token_b, token_a
+        _, reward, done, info = env.step(action_a, action_b)
+        trace[-1].update({"reward": reward, "done": done, "info": info})
+        if done: break
+    return env, trace

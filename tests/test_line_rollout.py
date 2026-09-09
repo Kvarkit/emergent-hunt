@@ -1,7 +1,8 @@
 import unittest
 
 from emergent_hunt.line_policy import GRULineAgent
-from emergent_hunt.line_rollout import collect_grid, rollout_episode
+from emergent_hunt.line_rollout import (canonical_crossed_rollout, collect_grid,
+                                         rollout_episode)
 
 
 class LineRolloutTests(unittest.TestCase):
@@ -19,6 +20,14 @@ class LineRolloutTests(unittest.TestCase):
         self.assertEqual(len(records), 6)
         self.assertTrue(all(r['factors']['goal_position'] != r['factors']['trap_position']
                             for r in records))
+
+    def test_canonical_crossed_policy_solves_all_pairs(self):
+        for goal in range(5):
+            for trap in range(5):
+                if goal == trap:
+                    continue
+                env, _ = canonical_crossed_rollout(goal, trap)
+                self.assertTrue(env.state.success, (goal, trap))
 
 
 if __name__ == '__main__':
