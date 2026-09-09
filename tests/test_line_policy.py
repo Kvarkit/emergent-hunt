@@ -3,7 +3,7 @@ import torch
 
 from emergent_hunt.line_hunt import LineHunt
 from emergent_hunt.line_policy import GRULineAgent, line_observation
-from emergent_hunt.train_line import train
+from emergent_hunt.train_line import train, train_canonical_control
 
 
 class LinePolicyTests(unittest.TestCase):
@@ -44,6 +44,10 @@ class LinePolicyTests(unittest.TestCase):
         result = train(seed=0, episodes=5, horizon=3)
         self.assertEqual(result['episodes'], 5)
         self.assertTrue(result['history'])
+
+    def test_canonical_control_builds(self):
+        a, b = train_canonical_control(seed=0, episodes=3, horizon=2)
+        self.assertEqual(a.vocab, b.vocab)
 
 
 if __name__ == "__main__":
