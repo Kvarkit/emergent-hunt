@@ -411,6 +411,37 @@ class BlindControlTests(unittest.TestCase):
         self.assertFalse(report['exact'])
         self.assertTrue(blind_upper_bound(targets=1, split='test', by='pair')['exact'])
 
+    def test_the_clean_regime_exists_only_because_the_handshake_has_no_lag(self):
+        """The design's tightest constraint, and why predictive readiness matters.
+
+        deadline=4 is simultaneously the shortest deadline the reference
+        protocol can solve every task under, and the largest deadline at which a
+        message-blind sweeper cannot reach a second trap (bound still 1/9). The
+        window is exactly one value wide. A retrospective "the trap is armed"
+        reply costs one more step per target, which would push the shortest
+        solvable deadline to 5 -- where the blind bound has already doubled to
+        2/9. So the lag would not merely slow the oracle down: it would destroy
+        the only regime in which this configuration measures communication.
+        """
+        corpus = tasks(targets=1, split='all')
+        solvable = {}
+        for deadline in (3, 4, 5):
+            failures = 0
+            for task in corpus:
+                try:
+                    oracle_rollout(task, targets=1, horizon=deadline, patience=deadline)
+                except AssertionError:
+                    failures += 1
+            solvable[deadline] = failures
+        self.assertGreater(solvable[3], 0, 'deadline 3 should be too tight')
+        self.assertEqual(solvable[4], 0, 'deadline 4 must be solvable')
+        self.assertEqual(solvable[5], 0)
+        bounds = {d: blind_reference(split='all', by='pair', horizon=d,
+                                     patience=d)['optimal_blind_success']
+                  for d in (4, 5)}
+        self.assertAlmostEqual(bounds[4], 1 / 9)
+        self.assertAlmostEqual(bounds[5], 2 / 9)
+
     def test_reference_protocol_beats_the_blind_bound_by_a_wide_margin(self):
         corpus = tasks(targets=1, split='test', by='pair')
         caught = sum(oracle_rollout(task, targets=1, horizon=8, patience=4)['caught']
