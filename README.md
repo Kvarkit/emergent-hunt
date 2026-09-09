@@ -42,7 +42,10 @@ lets the prey escape. `trap_probe.py` perturbs one token at one step and reports
 which part of the decoded action (target / method / timing) moves; on identical
 intact behaviour it accepts the handwritten factorized code and rejects an
 entangled one. `train_trap.py` is the REINFORCE trainer over the same
-environment, with matched-budget no-message and no-readiness controls.
+environment, with matched-budget no-message and no-readiness controls, and
+`trap_diagnose.py` reads a learned pair back: which rung of
+reach -> first_guess -> in_position -> fire -> catch it falls off, and how many
+bits its wire carries about the zone and the required mechanism.
 
 The message-blind bound is *not* a constant: a blind preparer can sweep the line
 and fire one trap after another while the driver stalls, so `blind_reference`
@@ -51,7 +54,41 @@ depends on the horizon and on the prey's patience. Without a deadline the
 solvable blind, so held-out catch rates there mean nothing unless a deadline is
 set. At n=3, horizon 8 and patience 4 the reference protocol still solves every
 task while a two-trap sweep does not fit, and the bound is the intended 1/9
-(all), 1/6 (train), 1/3 (test). Relaxing the sender wiring also retains 100% transfer across three seeds:
+(all), 1/6 (train), 1/3 (test). The partial preparation reward needs a bound of
+its own, since it is what a learner climbs first: `blind_preparation_bound` is
+1/3 on the train split at horizon 4, 1/2 at horizon 8.
+
+The first 60k-episode sweep (`results/trap-single-target-s*.json`) caught nothing
+in three seeds, and diagnosis found two reasons that were not learning failures.
+The partial reward was paid the first time a trap's *current* mechanism matched,
+so cycling PREPARE(0), PREPARE(1), PREPARE(2) collected it with certainty and no
+information; it is now paid only for the first attempt at a trap. And every prey
+died at the same rung -- `in_position`, the prey standing on a correctly armed
+trap -- which never happened once in 27 tasks, because DRIVE has no reward
+channel except a catch the driver has never seen. The optional `approach` term
+(deducted from the catch reward, so a success still totals 1.0) pays for exactly
+that state. The rerun (`results/trap-fixed-s*.json`, horizon 4, start_pos 1, 60k
+episodes, 3 seeds, 3 modes) puts `first_guess_rate` at 0.500 in every
+communication and no_readiness run against 0.333 -- the blind ceiling -- in every
+no_message run.
+
+At 200k episodes (`results/trap-long-s*.json`, communication vs no_message,
+three seeds, 101 evaluations each) that separation is unambiguous. On the train
+split the communication arm peaks at 0.667/0.667/0.611 first-guess and stands
+above the 0.333 blind ceiling for 71/60/93 of its evaluations; the no_message
+arm peaks at exactly 0.333 and clears it in 0 of 303. So the required mechanism
+*is* being transmitted, replicated across seeds against a matched-budget control
+that never once beats its own exact bound.
+
+Catches are still a negative result. Against a 0.167 blind bound the
+communication arm peaks at 0.278/0.000/0.111 and only seed 0 clears the bound at
+all -- for 36 evaluations, after which it collapses back to 0.000 rather than
+converging, which is why `trap_diagnose.summarize_history` reports best and
+time-above-bound and not only the final number. And nothing transfers: every
+figure on the held-out `by='pair'` split is 0.000 in both arms and all three
+seeds, below the 1/3 a uniform guess would score, so the learned code is a
+table over the training pairs and not a composition of them.
+Relaxing the sender wiring also retains 100% transfer across three seeds:
 [receiver-only isolation](experiments/receiver-slots.md). Receiver position
 semantics remain imposed; word-order emergence has not been demonstrated.
 Successful coordination alone will not be treated as evidence of grammar.
@@ -75,7 +112,8 @@ python -m emergent_hunt.train --steps 2000 --seeds 0 1 2
 python -m emergent_hunt.train --by pair --steps 2000 --seeds 0 1 2 --output results/pair-smoke.json
 python -m emergent_hunt.trap_prep     # blind bounds + reference-protocol check
 python -m emergent_hunt.trap_probe    # token-selectivity matrix, both codes
-python -m emergent_hunt.train_trap --episodes 60000 --seeds 0 --probe
+python -m emergent_hunt.train_trap --episodes 60000 --seeds 0 --horizon 4 --start-pos 1 --approach 0.25
+python -m emergent_hunt.trap_diagnose results/trap-smoke-0-communication.pt
 ```
 
 Sender observes `(prey, direction)`, sends up to two discrete tokens; receiver

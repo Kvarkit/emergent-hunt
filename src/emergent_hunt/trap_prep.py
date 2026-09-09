@@ -154,7 +154,8 @@ class TrapPrepHunt:
                  mechanisms=None, horizon=16, window=1, vocabulary=8,
                  driver_message_length=3, preparer_message_length=1,
                  erasure=0.0, message_cost=0.0, move_cost=0.0, partial=0.25,
-                 start_pos=0, patience=None, stop_when_resolved=True):
+                 approach=0.0, start_pos=0, patience=None,
+                 stop_when_resolved=True):
         self._tasks = tasks(n, targets, split, by)
         mechanisms = n if mechanisms is None else mechanisms
         if type(mechanisms) is not int or mechanisms < 1:
@@ -175,12 +176,15 @@ class TrapPrepHunt:
             raise ValueError('costs must be nonnegative')
         if not 0 <= partial <= 1:
             raise ValueError('partial must be in [0, 1]')
+        if not 0 <= approach or partial + approach > 1:
+            raise ValueError('approach must be nonnegative with partial + approach <= 1')
         if not 0 <= start_pos < n:
             raise ValueError('start_pos outside the line')
         if patience is not None and (type(patience) is not int or patience < 1):
             raise ValueError('patience must be None or a positive integer')
         self.n, self.targets, self.mechanisms = n, targets, mechanisms
         self.horizon, self.window, self.partial = horizon, window, partial
+        self.approach = approach
         self.vocabulary = vocabulary
         self.driver_message_length = driver_message_length
         self.preparer_message_length = preparer_message_length
@@ -246,8 +250,9 @@ class TrapPrepHunt:
         deadline = self.horizon if self.patience is None else self.patience
         self._patience_left = [deadline] * self.targets
         self._status = [ACTIVE] * self.targets
-        self._totals = {'prepare': 0.0, 'catch': 0.0, 'move_cost': 0.0,
-                        'message_cost': 0.0, 'reward': 0.0}
+        self._approached = [False] * self.targets
+        self._totals = {'prepare': 0.0, 'approach': 0.0, 'catch': 0.0,
+                        'move_cost': 0.0, 'message_cost': 0.0, 'reward': 0.0}
         self._events = []
         self.trace = []
         self._phase = 'driver_send'
@@ -317,8 +322,32 @@ class TrapPrepHunt:
         if type(action) is not int or not 0 <= action < PREPARE_BASE + self.mechanisms:
             raise ValueError('invalid preparer action')
         reward = -self._step_cost
-        components = {'prepare': 0.0, 'catch': 0.0, 'move_cost': 0.0,
-                      'message_cost': self._step_cost}
+        components = {'prepare': 0.0, 'approach': 0.0, 'catch': 0.0,
+                      'move_cost': 0.0, 'message_cost': self._step_cost}
+        # Optional shaping (approach=0 reproduces the original three-part
+        # scheme exactly). Paid once per target, BEFORE this step's action is
+        # applied, for the state the whole protocol is a plan to reach: the prey
+        # standing on a charged trap that already carries the mechanism its type
+        # requires. It is the missing rung on the ladder -- reaching it needs the
+        # method to have been communicated AND the arrival to have been timed --
+        # and without it the driver has no partial credit whatsoever, since
+        # DRIVE only ever pays through a catch. Deducted from the catch reward,
+        # so a full success still totals exactly 1.0 per target, and the
+        # message-blind bound is untouched because that bound counts catches.
+        for j, t in enumerate(self.task.targets):
+            if (self._status[j] == ACTIVE and not self._approached[j]
+                    and self._distance[j] == 0 and self._window_left[j] > 0
+                    and self._charged[t.zone]
+                    and self._prepared[t.zone] == mechanism_for(
+                        t.prey_type, self.mechanisms)):
+                self._approached[j] = True
+                # The event is logged whether or not it is paid, so
+                # `in_position` is available as a diagnostic in the unshaped
+                # scheme too.
+                self._step_events.append(('in_position', j))
+                if self.approach:
+                    components['approach'] += self.approach
+                    reward += self.approach
         zone = self._pos
         activation = None
         if action in (MOVE_LEFT, MOVE_RIGHT):
@@ -329,13 +358,30 @@ class TrapPrepHunt:
                 reward -= self.move_cost
         elif action >= PREPARE_BASE:
             mechanism = action - PREPARE_BASE
-            self._prepared[zone] = mechanism
             required = [mechanism_for(t.prey_type, self.mechanisms)
                         for t in self.task.targets if t.zone == zone]
-            # Partial reward for CORRECT preparation, paid at most once per trap:
-            # repeating (or redoing) preparation earns no additional points.
-            if required and mechanism == required[0] and not self._paid[zone]:
-                self._paid[zone] = True
+            # Partial reward for CORRECT preparation, and only for the FIRST
+            # preparation attempted at this trap: preparation is a one-shot
+            # commitment, so the partial reward measures a *guess*.
+            #
+            # This is not merely "no extra points for repeating". An earlier
+            # version paid whenever the current mechanism first matched, which
+            # let a message-blind preparer cycle PREPARE(0), PREPARE(1),
+            # PREPARE(2) on one trap and collect the partial reward with
+            # probability 1, without reading anything. Under that rule the
+            # partial reward carried no evidence that the mechanism had been
+            # communicated -- and REINFORCE duly converged on a fixed sweep
+            # with constant, information-free messages (results/trap-single-
+            # target-s*.json). Paying only the first attempt makes the blind
+            # expectation exactly partial/mechanisms and gives the channel a
+            # dense gradient. The trap's mechanism itself stays mutable, so a
+            # later correction can still enable a catch; only the payment is
+            # one-shot, and the message-blind catch bound is unaffected because
+            # only the mechanism standing at activation time decides a catch.
+            first_attempt = not self._paid[zone]
+            self._paid[zone] = True
+            self._prepared[zone] = mechanism
+            if first_attempt and required and mechanism == required[0]:
                 components['prepare'] = self.partial
                 reward += self.partial
                 self._step_events.append(('prepared_correctly', zone))
@@ -355,8 +401,8 @@ class TrapPrepHunt:
                 if j is not None and self._prepared[zone] == mechanism_for(
                         self.task.targets[j].prey_type, self.mechanisms):
                     self._status[j] = CAUGHT
-                    components['catch'] = 1.0 - self.partial
-                    reward += 1.0 - self.partial
+                    components['catch'] = 1.0 - self.partial - self.approach
+                    reward += 1.0 - self.partial - self.approach
                     self._step_events.append(('caught', j))
                 elif j is not None:
                     self._step_events.append(('wrong_method', zone))
@@ -382,7 +428,7 @@ class TrapPrepHunt:
             if self._patience_left[j] <= 0:
                 self._status[j] = ESCAPED
                 self._step_events.append(('fled', j))
-        for key in ('prepare', 'catch'):
+        for key in ('prepare', 'approach', 'catch'):
             self._totals[key] += components[key]
         for key in ('move_cost', 'message_cost'):
             self._totals[key] += components[key]
@@ -544,7 +590,7 @@ def oracle_rollout(task, **kwargs):
 # -- exact message-blind control ----------------------------------------------
 
 def blind_reference(n=3, split='all', by='pair', horizon=16, start_pos=0,
-                    mechanisms=None, patience=None):
+                    mechanisms=None, patience=None, window=1):
     """Exact optimal catch rate for a single-target preparer that hears nothing.
 
     Theorem. Every zone holds a trap and the preparer never observes the prey,
@@ -576,9 +622,9 @@ def blind_reference(n=3, split='all', by='pair', horizon=16, start_pos=0,
     """
     report = blind_upper_bound(n=n, targets=1, split=split, by=by, horizon=horizon,
                                start_pos=start_pos, mechanisms=mechanisms,
-                               patience=patience)
+                               patience=patience, window=window)
     return {'split': split, 'by': by, 'tasks': report['tasks'],
-            'horizon': horizon, 'patience': patience,
+            'horizon': horizon, 'patience': patience, 'window': window,
             'optimal_blind_success': report['upper_bound_catches_per_task'],
             'exact': True,
             'argmax_schedule_zone_mechanism_step':
@@ -587,7 +633,7 @@ def blind_reference(n=3, split='all', by='pair', horizon=16, start_pos=0,
 
 def blind_upper_bound(n=3, targets=2, split='all', by='pair', horizon=16,
                       start_pos=0, mechanisms=None, task_list=None,
-                      patience=None):
+                      patience=None, window=1):
     """Provable upper bound on the message-blind catch rate for any number of
     targets, by maximizing over *activation schedules* rather than sequences.
     Reproduces `blind_reference` exactly when targets == 1.
@@ -624,9 +670,14 @@ def blind_upper_bound(n=3, targets=2, split='all', by='pair', horizon=16,
     prey = sum(len(task.targets) for task in corpus)
     demands = Counter((t.zone, mechanism_for(t.prey_type, mechanisms), t.start_distance)
                       for task in corpus for t in task.targets)
-    # A prey flees at the end of step `patience`, so an activation after that
-    # catches nothing: the deadline caps every schedule.
-    horizon = min(horizon, horizon if patience is None else patience)
+    # A prey must ARRIVE by the end of step `patience`, and once it has arrived
+    # it stays catchable for `window` steps. The last step at which any
+    # activation can catch anything is therefore patience + window - 1, and that
+    # deadline caps every schedule. (Widening the firing window buys the
+    # learners timing slack, but it also buys a blind sweeper the same slack --
+    # which is exactly why it must enter the bound and not be treated as free.)
+    if patience is not None:
+        horizon = min(horizon, patience + window - 1)
     best, argmax = 0, None
     for length in range(1, min(n, horizon) + 1):
         for order in permutations(range(n), length):
@@ -651,11 +702,63 @@ def blind_upper_bound(n=3, targets=2, split='all', by='pair', horizon=16,
                 if total > best:
                     best, argmax = total, tuple(zip(order, methods, steps))
     return {'split': split, 'by': by, 'targets': targets, 'tasks': len(corpus),
-            'prey': prey,
+            'prey': prey, 'window': window, 'patience': patience,
             'upper_bound_catch_rate': best / prey if prey else None,
             'upper_bound_catches_per_task': best / len(corpus) if corpus else None,
             'exact': targets == 1,
             'argmax_schedule_zone_mechanism_step': argmax}
+
+
+def blind_preparation_bound(n=3, split='all', by='pair', horizon=16,
+                            start_pos=0, mechanisms=None, task_list=None):
+    """Exact ceiling on the *partial preparation* reward for a message-blind
+    preparer, in prey per task -- the companion of `blind_reference`, which
+    bounds catches.
+
+    It exists because the partial reward, not the catch, is what a learner
+    actually climbs first, so it is the number a learned `first_guess_rate` has
+    to beat before any claim is made that the method was communicated.
+
+    Derivation. By the theorem in `blind_reference` a blind preparer is a fixed
+    action sequence, and since the payment is one-shot all that matters about
+    zone z is the mechanism of the FIRST preparation attempted there. The
+    payment ignores the prey's position and status, so the driver is irrelevant
+    and timing drops out entirely: a sequence is characterized by an ordered
+    subset of zones z_1..z_r with methods m_1..m_r, feasible iff walking
+    start -> z_1 -> ... -> z_r plus one step per preparation fits the horizon,
+
+        travel(start, z_1, ..., z_r) + r <= horizon.
+
+    Given a feasible zone set each zone's method is chosen independently, so the
+    optimum is the best feasible set of zones scored by its most common required
+    mechanism. Note the horizon enters only through how many zones are
+    reachable: at n=3 and horizon >= 5 every zone is coverable and the bound is
+    just "the commonest mechanism per zone", which on the by='pair' train split
+    is exactly 1/2.
+    """
+    corpus = tuple(task_list) if task_list is not None else tasks(n, 1, split, by)
+    mechanisms = n if mechanisms is None else mechanisms
+    prey = sum(len(task.targets) for task in corpus)
+    demands = Counter((t.zone, mechanism_for(t.prey_type, mechanisms))
+                      for task in corpus for t in task.targets)
+    per_zone = {z: max((demands[(z, m)] for m in range(mechanisms)), default=0)
+                for z in range(n)}
+    best, argmax = 0, ()
+    for length in range(0, n + 1):
+        for order in permutations(range(n), length):
+            travel, position = 0, start_pos
+            for zone in order:
+                travel += abs(position - zone)
+                position = zone
+            if travel + length > horizon:
+                continue
+            total = sum(per_zone[z] for z in order)
+            if total > best:
+                best, argmax = total, order
+    return {'split': split, 'by': by, 'tasks': len(corpus), 'prey': prey,
+            'horizon': horizon, 'exact': True,
+            'upper_bound_first_guess_rate': best / prey if prey else None,
+            'argmax_zone_order': argmax}
 
 
 def blind_search(env_kwargs=None, task_list=None):

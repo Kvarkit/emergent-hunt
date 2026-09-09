@@ -27,9 +27,18 @@ Controls, at matched episode budget:
   no_readiness   -- the preparer->driver wire is zeroed: the driver must time
                     the arrival without hearing that the trap is ready.
 
+Report two rates against two different bounds, because they fail differently.
+`first_guess_rate` (the one-shot preparation payment) is bounded for a blind
+preparer by trap_prep.blind_preparation_bound, and `catch_rate` by
+trap_prep.blind_reference; `correct_prep_rate` is kept only for continuity with
+the first sweep and should not be read as evidence of anything, since it reports
+the trap's FINAL mechanism and a blind preparer can set that by trying every
+mechanism in turn.
+
 No claim of emergent grammar is made from anything here. Catch rate is reported
 against trap_prep.blind_reference and the split-matched held-out corpus, and
-the learned pair is handed to trap_probe.selectivity for a token-level readout.
+the learned pair is handed to trap_probe.selectivity for a token-level readout
+and to trap_diagnose for the stage-by-stage and bits-on-the-wire readout.
 """
 import argparse
 import json
@@ -42,7 +51,8 @@ from torch.distributions import Categorical
 from torch.nn.functional import one_hot
 
 from .trap_prep import (ACTIVE, CAUGHT, DRIVE_BASE, PREPARE_BASE, TrapPrepHunt,
-                        blind_reference, mechanism_for, tasks)
+                        blind_preparation_bound, blind_reference, mechanism_for,
+                        tasks)
 from .train import mlp
 
 MODES = ('communication', 'no_message', 'no_readiness')
@@ -192,6 +202,7 @@ def evaluate(driver, preparer, encoder, env, corpus, mode='communication'):
     result = {}
     for condition in ('intact', 'mute'):
         caught = prepared = prey = reward = success = 0
+        first_guess = in_position = 0
         for task in corpus:
             run_mode = mode if condition == 'intact' else 'no_message'
             out = rollout(env, driver, preparer, encoder, task=task,
@@ -204,29 +215,60 @@ def evaluate(driver, preparer, encoder, env, corpus, mode='communication'):
             prepared += sum(1 for t in task.targets
                             if env.prepared_methods[t.zone] == mechanism_for(
                                 t.prey_type, env.mechanisms))
+            # The one-shot preparation payment is the message-sensitive
+            # statistic: correct_prep_rate below only reads the trap's FINAL
+            # mechanism, which a blind preparer can also set by trying every
+            # mechanism in turn. first_guess_rate counts the prey whose trap was
+            # right on the single attempt that could pay, so a blind preparer
+            # is pinned at 1/mechanisms.
+            first_guess += info['totals']['prepare'] / env.partial if env.partial else 0
+            in_position += sum(1 for step in out['trace']
+                               for name, _ in step['events'] if name == 'in_position')
         result[condition] = {'catch_rate': caught / prey,
+                             'first_guess_rate': first_guess / prey,
                              'correct_prep_rate': prepared / prey,
+                             'in_position_rate': in_position / prey,
                              'mean_reward': reward / len(corpus),
                              'all_caught_rate': success / len(corpus)}
     return result
 
 
 def run(seed=0, mode='communication', episodes=20000, batch=16, n=3, targets=1,
-        by='pair', horizon=8, window=1, patience=4, stop_when_resolved=False,
-        gamma=.97, lr=3e-3, entropy_coef=.02,
+        by='pair', horizon=8, window=1, patience=4, approach=0.0, start_pos=0,
+        stop_when_resolved=False, gamma=.97, lr=3e-3, entropy_coef=.02,
         report_every=2000, checkpoint=None, on_report=None):
     """Defaults matter here and are not arbitrary.
 
-    patience=4 (with n=3, horizon=8) is the regime in which the reference
-    protocol still solves every task while a message-blind sweep cannot reach a
-    second trap, so trap_prep.blind_reference is 1/9, 1/6, 1/3 rather than the
-    1/3, 1/2, 1.0 it would be with no deadline. Without it the by='pair' test
-    split is solvable blind and a high test catch rate would mean nothing.
+    patience=4 (with n=3) is the regime in which the reference protocol still
+    solves every task while a message-blind sweep cannot reach a second trap, so
+    trap_prep.blind_reference is 1/9, 1/6, 1/3 rather than the 1/3, 1/2, 1.0 it
+    would be with no deadline. Without it the by='pair' test split is solvable
+    blind and a high test catch rate would mean nothing.
 
     stop_when_resolved=False keeps the scene running after the prey is gone.
     Early termination is a trap for a learner: an untrained driver drives at
     once, the prey escapes on step two, and the preparer never gets enough
     steps to discover that preparing pays at all.
+
+    horizon=8 and start_pos=0 are kept as the historical defaults so the
+    published sweep stays reproducible, but the diagnosed regime for new runs is
+    horizon=4, start_pos=1, for two independent reasons:
+
+    * horizon > patience + window - 1 leaves steps on which nothing can be won.
+      They still emit four log-probability terms each, and per-episode advantage
+      normalization gives them a systematically negative advantage, so they are
+      not merely wasted -- they push probability mass away from whatever was
+      emitted there. Cutting them also removes a freebie: the partial reward
+      does not check the prey's status, so at horizon=8 a preparer could stroll
+      the whole line arming traps long after the prey had fled, which is exactly
+      what the first sweep learned to do. It also tightens the blind ceiling on
+      first_guess_rate from 1/2 to 1/3 on the train split.
+    * start_pos=1 (the middle of the line) leaves every bound untouched -- a
+      blind two-trap sweep still costs 5 steps from anywhere -- while cutting
+      the reference protocol's worst-case travel from 2 steps to 1. At
+      start_pos=0 the oracle's slack against the deadline is exactly zero on the
+      far zone, so learners had to hit a one-step firing window with no margin
+      at all. At start_pos=1 the minimum slack is 1.
     """
     if mode not in MODES:
         raise ValueError(f'mode must be one of {MODES}')
@@ -234,6 +276,7 @@ def run(seed=0, mode='communication', episodes=20000, batch=16, n=3, targets=1,
     torch.set_num_threads(1)
     env = TrapPrepHunt(n=n, targets=targets, split='train', by=by, seed=seed,
                        horizon=horizon, window=window, patience=patience,
+                       approach=approach, start_pos=start_pos,
                        stop_when_resolved=stop_when_resolved)
     encoder = TrapEncoder(env)
     driver, preparer = TrapDriver(encoder), TrapPreparer(encoder)
@@ -283,18 +326,31 @@ def run(seed=0, mode='communication', episodes=20000, batch=16, n=3, targets=1,
         Path(checkpoint).parent.mkdir(parents=True, exist_ok=True)
         torch.save({'driver': driver.state_dict(), 'preparer': preparer.state_dict(),
                     'config': {'seed': seed, 'mode': mode, 'n': n, 'targets': targets,
-                               'by': by, 'horizon': horizon, 'window': window}},
+                               'by': by, 'horizon': horizon, 'window': window,
+                               'patience': patience, 'approach': approach,
+                               'start_pos': start_pos}},
                    checkpoint)
     return {'seed': seed, 'mode': mode, 'episodes': episodes, 'batch': batch,
             'n': n, 'targets': targets, 'by': by, 'horizon': horizon,
-            'window': window, 'patience': patience,
-            'stop_when_resolved': stop_when_resolved,
+            'window': window, 'patience': patience, 'approach': approach,
+            'start_pos': start_pos, 'stop_when_resolved': stop_when_resolved,
             'gamma': gamma, 'lr': lr,
             'entropy_coef': entropy_coef, 'torch': torch.__version__,
             'seconds': time.perf_counter() - start,
+            # The bound must be the one for the configuration actually run: it
+            # depends on the horizon, the prey's patience AND the firing window,
+            # since a wider window postpones the last useful activation for a
+            # blind sweeper exactly as much as it does for the learners.
             'blind_bound': {split: blind_reference(
+                n=n, split=split, by=by, horizon=horizon, start_pos=start_pos,
+                patience=patience, window=window)['optimal_blind_success']
+                for split in ('train', 'test')} if targets == 1 else None,
+            # first_guess_rate has its own, different ceiling: the partial
+            # reward ignores the prey's position, so a blind preparer is bounded
+            # by how many zones it can reach and guess at within the horizon.
+            'blind_preparation_bound': {split: blind_preparation_bound(
                 n=n, split=split, by=by, horizon=horizon,
-                patience=patience)['optimal_blind_success']
+                start_pos=start_pos)['upper_bound_first_guess_rate']
                 for split in ('train', 'test')} if targets == 1 else None,
             'initial': initial, 'history': history,
             'agents': (driver, preparer, encoder, env)}
@@ -354,6 +410,11 @@ def main():
     parser.add_argument('--by', choices=['triple', 'pair'], default='pair')
     parser.add_argument('--horizon', type=int, default=8)
     parser.add_argument('--patience', type=int, default=4)
+    parser.add_argument('--window', type=int, default=1)
+    parser.add_argument('--start-pos', dest='start_pos', type=int, default=0)
+    parser.add_argument('--approach', type=float, default=0.0,
+                        help='shaping reward for a prey standing on a correctly '
+                             'armed trap, deducted from the catch reward')
     parser.add_argument('--probe', action='store_true',
                         help='run trap_probe.selectivity on the learned pair')
     parser.add_argument('--output', default='results/trap-smoke.json')
@@ -366,7 +427,9 @@ def main():
             checkpoint = target.with_name(f'{target.stem}-{seed}-{mode}.pt')
             result = run(seed=seed, mode=mode, episodes=args.episodes,
                          targets=args.targets, by=args.by, horizon=args.horizon,
-                         patience=args.patience, checkpoint=checkpoint)
+                         patience=args.patience, window=args.window,
+                         approach=args.approach, start_pos=args.start_pos,
+                         checkpoint=checkpoint)
             driver, preparer, encoder, env = result.pop('agents')
             if args.probe and mode == 'communication':
                 from .trap_probe import selectivity
@@ -376,6 +439,9 @@ def main():
                                        split=split, max_tasks=24,
                                        env_kwargs={'horizon': args.horizon,
                                                    'patience': args.patience,
+                                                   'window': args.window,
+                                                   'approach': args.approach,
+                                                   'start_pos': args.start_pos,
                                                    'stop_when_resolved': False})
                     for split in ('train', 'test')}
             results.append(result)
@@ -384,7 +450,9 @@ def main():
                               'seconds': round(result['seconds'], 1),
                               'train': result['history'][-1]['train']['intact'],
                               'test': result['history'][-1]['test']['intact'],
-                              'blind_bound': result['blind_bound']}), flush=True)
+                              'blind_bound': result['blind_bound'],
+                              'blind_preparation_bound':
+                                  result['blind_preparation_bound']}), flush=True)
 
 
 if __name__ == '__main__':
