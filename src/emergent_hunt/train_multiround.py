@@ -15,7 +15,8 @@ def _route_messages(ma, mb, vocab, task, use_messages=True):
     if not use_messages:
         return torch.zeros(1, vocab), torch.zeros(1, vocab)
     if task == 'symmetric':
-        return oh(ma, vocab), oh(mb, vocab)
+        return oh(ma, vocab), (oh(mb, vocab) if mb is not None
+                               else torch.zeros(1, vocab))
     return oh(ma, vocab), torch.zeros(1, vocab)
 
 
@@ -223,7 +224,7 @@ def run(seed=0, episodes=3000, rounds=2, vocab=8, zones=4, use_messages=True,
         communication_task='symmetric', curriculum=False, type_count=3,
         coupled=False, receiver_aux=0.0, sender_aux=0.0,
         receiver_bootstrap_episodes=0, hidden_dim=32, holdout_mod=0,
-        auxiliary_decay=False, action_aux=0.0):
+        auxiliary_decay=False, action_aux=0.0, soft_curriculum=False):
     if communication_task not in ('symmetric', 'one_way'):
         raise ValueError('communication_task must be symmetric or one_way')
     torch.manual_seed(seed); torch.set_num_threads(1)
@@ -271,6 +272,9 @@ def run(seed=0, episodes=3000, rounds=2, vocab=8, zones=4, use_messages=True,
         logs=[]; values=[]; aux_losses=[]; sender_losses=[]; action_losses=[]
         active_task = ('one_way' if curriculum and ep <= episodes // 2
                        else communication_task)
+        reverse_probability = (min(1.0, ep / max(1, episodes // 2))
+                               if soft_curriculum and communication_task == 'symmetric'
+                               else 1.0)
         for r in range(rounds):
             marker = oh(torch.tensor([r]), rounds)
             pa = torch.cat((oh(prey_t,type_count), oh(prey_z,zones), marker), -1)
@@ -297,9 +301,10 @@ def run(seed=0, episodes=3000, rounds=2, vocab=8, zones=4, use_messages=True,
                     da = Categorical(logits=ta)
                     ma = da.sample()
                     mb = (Categorical(logits=tb).sample()
-                          if communication_task == 'symmetric' else None)
+                          if active_task == 'symmetric' and
+                          torch.rand(()) < reverse_probability else None)
                     message_logs = [da.log_prob(ma)]
-                    if active_task == 'symmetric':
+                    if active_task == 'symmetric' and mb is not None:
                         message_logs.append(Categorical(logits=tb).log_prob(mb))
                 last_a, last_b = _route_messages(ma, mb, vocab, active_task, True)
             else:
@@ -368,6 +373,7 @@ def run(seed=0, episodes=3000, rounds=2, vocab=8, zones=4, use_messages=True,
     eval_task = communication_task
     return {'seed':seed,'episodes':episodes,'rounds':rounds,'use_messages':use_messages,
             'communication_task': communication_task, 'curriculum': curriculum,
+            'soft_curriculum': soft_curriculum,
             'coupled': coupled, 'receiver_aux': receiver_aux, 'sender_aux': sender_aux,
             'receiver_bootstrap_episodes': receiver_bootstrap_episodes,
             'hidden_dim': hidden_dim,

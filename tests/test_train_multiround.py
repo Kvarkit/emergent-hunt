@@ -56,4 +56,10 @@ class MultiRoundLearningTests(unittest.TestCase):
         self.assertGreater(len(examples), 0)
         self.assertIn('token_a', examples[0])
 
+    def test_soft_curriculum_runs_without_missing_reverse_token(self):
+        r = run(seed=7, episodes=25, communication_task='symmetric',
+                soft_curriculum=True)
+        self.assertTrue(r['soft_curriculum'])
+        self.assertTrue(math.isfinite(r['history'][-1]['loss']))
+
 if __name__ == '__main__': unittest.main()
