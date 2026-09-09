@@ -25,11 +25,12 @@ class LineHuntState:
 
 
 class LineHunt:
-    def __init__(self, length: int = 5, horizon: int = 8):
+    def __init__(self, length: int = 5, horizon: int = 8, crossed: bool = False):
         if length < 3 or horizon < 1:
             raise ValueError("length must be >=3 and horizon >=1")
         self.length = length
         self.horizon = horizon
+        self.crossed = crossed
         self._state = None
 
     @property
@@ -54,11 +55,13 @@ class LineHunt:
     def observe(self, agent: str) -> Dict[str, int]:
         s = self.state
         if agent == "a":
-            return {"step": s.step, "self_pos": s.a_pos,
-                    "private_goal": s.goal_pos}
+            key, value = (("partner_target", s.trap_pos) if self.crossed else
+                          ("private_goal", s.goal_pos))
+            return {"step": s.step, "self_pos": s.a_pos, key: value}
         if agent == "b":
-            return {"step": s.step, "self_pos": s.b_pos,
-                    "private_trap": s.trap_pos}
+            key, value = (("partner_target", s.goal_pos) if self.crossed else
+                          ("private_trap", s.trap_pos))
+            return {"step": s.step, "self_pos": s.b_pos, key: value}
         raise ValueError("agent must be 'a' or 'b'")
 
     def deliver(self, message_to_a: int | None, message_to_b: int | None

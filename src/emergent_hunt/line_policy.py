@@ -32,9 +32,11 @@ def line_observation(env, agent: str, vocab: int, incoming: int | None = None):
     """Encode only the local/private view and the delivered token."""
     raw = env.observe(agent)
     if agent == "a":
-        obs = [raw["self_pos"], raw["private_goal"], raw["step"]]
+        private = raw.get("private_goal", raw.get("private_trap", raw.get("partner_target")))
+        obs = [raw["self_pos"], private, raw["step"]]
     elif agent == "b":
-        obs = [raw["self_pos"], raw["private_trap"], raw["step"]]
+        private = raw.get("private_trap", raw.get("private_goal", raw.get("partner_target")))
+        obs = [raw["self_pos"], private, raw["step"]]
     else:
         raise ValueError("agent must be 'a' or 'b'")
     token = torch.zeros(1, vocab)
